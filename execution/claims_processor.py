@@ -310,6 +310,29 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             policy_context = rag_engine.get_policy_context(extracted)
             full_claim_with_evidence = {**full_claim, "_raw_evidence_packet": raw_text}
             decision = glm_client.adjudicate_claim(full_claim_with_evidence, policy_context, claim_id=claim_id)
+            if not isinstance(decision, dict):
+                decision = {}
+            # Normalize common model key drift so downstream logic doesn't lose decision context.
+            if not decision.get("decision"):
+                decision["decision"] = (
+                    decision.get("result")
+                    or decision.get("final_decision")
+                    or decision.get("adjudication_decision")
+                    or "REFERRED"
+                )
+            if decision.get("confidence") is None:
+                decision["confidence"] = decision.get("adjudication_confidence")
+            if decision.get("confidence") is None:
+                decision["confidence"] = 0.65
+            if not str(decision.get("reasoning") or "").strip():
+                for alias in ("reason", "explanation", "rationale", "processing_notes"):
+                    alias_val = decision.get(alias)
+                    if isinstance(alias_val, str) and alias_val.strip():
+                        decision["reasoning"] = alias_val.strip()
+                        break
+            if not str(decision.get("reasoning") or "").strip():
+                decision["reasoning"] = "Initial adjudication completed. Claim routed for manual review."
+
             decision["denial_prediction"] = denial_predictor.predict_denial(full_claim_with_evidence)
             result["steps"]["denial_predictor"] = decision["denial_prediction"]
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=0)
@@ -379,6 +402,8 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 fraud_findings = [f for f in critical_findings if f["source"] == "CROSS_REFERENCE"]
                 scrub_findings = [f for f in critical_findings if f["source"] == "SCRUBBER"]
                 validation_mismatch_findings = [f for f in critical_findings if f["source"] == "VALIDATION"]
+                disposition_findings = [f for f in critical_findings if f["source"] == "DISPOSITION"]
+                evidence_findings = [f for f in critical_findings if f["source"] == "MISSING_EVIDENCE"]
                 
                 if validation_mismatch_findings:
                     final_status = "UNDER_REVIEW"
@@ -405,6 +430,14 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                     final_status = "DENIED"
                     decision["reasoning"] = scrub_findings[0]["detail"]
                     decision["denial_reason_code"] = scrub_findings[0].get("carc", "16")
+                elif disposition_findings or evidence_findings:
+                    final_status = "UNDER_REVIEW"
+                    synthesized = [x["detail"] for x in (disposition_findings + evidence_findings) if x.get("detail")]
+                    if synthesized:
+                        decision["reasoning"] = (
+                            "Deterministic policy checks flagged this claim for manual review.\n\n"
+                            + "\n".join([f"- {s}" for s in synthesized[:6]])
+                        )
             
             if final_status == "APPROVED" and fraud_level in ("HIGH", "CRITICAL") and fraud_rec in ("INVESTIGATE", "BLOCK"):
                 logger.warning(
@@ -453,6 +486,26 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             # Update the decision in DB if it was overridden
             if decision.get("_fraud_override") or decision.get("_denial_override") or decision.get("_freeze_override") or decision.get("_validation_override") or critical_findings:
                 decision["decision"] = final_status
+            # Final hardening: never persist an empty reasoning/confidence payload.
+            if decision.get("confidence") is None:
+                decision["confidence"] = decision.get("adjudication_confidence")
+            if decision.get("confidence") is None:
+                decision["confidence"] = 0.65
+            if not str(decision.get("reasoning") or "").strip():
+                reason_bits = []
+                if critical_findings:
+                    reason_bits.extend([f.get("detail", "") for f in critical_findings if f.get("detail")])
+                if not reason_bits and disposition.get("rule_hits"):
+                    reason_bits.extend([f"{h.get('rule_id')}: {h.get('reason')}" for h in disposition.get("rule_hits", []) if h.get("reason")])
+                if not reason_bits:
+                    dp = decision.get("denial_prediction") or {}
+                    rf = dp.get("top_risk_factors") or []
+                    if rf:
+                        reason_bits.append(f"Top denial risk factors: {', '.join([str(x) for x in rf])}")
+                if reason_bits:
+                    decision["reasoning"] = "Manual review rationale:\n" + "\n".join([f"- {x}" for x in reason_bits[:6]])
+                else:
+                    decision["reasoning"] = "Manual review required based on adjudication and risk controls."
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=1)
 
             cycle_time = (time.time() - start_time) / 3600 # hours

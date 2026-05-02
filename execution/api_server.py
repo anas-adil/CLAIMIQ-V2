@@ -325,8 +325,14 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
         full_result = _safe_json_parse(dec_dict.get("full_result"), {})
         if isinstance(full_result, dict):
             for key, value in full_result.items():
-                if key not in dec_dict or dec_dict[key] is None:
+                # Use empty-string check so a blank DB column doesn't block
+                # the richer value stored inside full_result JSON.
+                if key not in dec_dict or not dec_dict.get(key):
                     dec_dict[key] = value
+        if dec_dict.get("confidence") is None:
+            dec_dict["confidence"] = dec_dict.get("adjudication_confidence")
+        if dec_dict.get("confidence") is None:
+            dec_dict["confidence"] = 0.65
         # Remove the raw full_result string to avoid sending duplicate data
         dec_dict.pop("full_result", None)
         res["decision"] = dec_dict
@@ -348,6 +354,33 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
         res["fraud"] = fraud_dict
     else:
         res["fraud"] = None
+
+    # Backfill legacy/sparse decision records so UI/chat never render empty reasoning.
+    if isinstance(res.get("decision"), dict):
+        dec = res["decision"]
+        if not str(dec.get("reasoning") or "").strip():
+            reasons = []
+            xsum = ((res.get("cross_ref_result") or {}).get("deterministic_summary") or {})
+            if isinstance(xsum, dict):
+                crit = int(xsum.get("critical_count") or 0)
+                warn = int(xsum.get("warning_count") or 0)
+                verdict = xsum.get("verdict")
+                if verdict:
+                    reasons.append(f"Evidence consistency verdict: {verdict} (critical={crit}, warnings={warn}).")
+            fr = res.get("fraud") or {}
+            if isinstance(fr, dict):
+                risk_level = fr.get("risk_level")
+                risk_score = fr.get("risk_score", fr.get("fraud_risk_score"))
+                if risk_level:
+                    reasons.append(f"Fraud model risk: {risk_level} ({risk_score}).")
+            dp = dec.get("denial_prediction") or {}
+            if isinstance(dp, dict) and dp.get("top_risk_factors"):
+                factors = ", ".join([str(x) for x in (dp.get("top_risk_factors") or [])[:3]])
+                reasons.append(f"Top denial risk factors: {factors}.")
+            if reasons:
+                dec["reasoning"] = "Manual review rationale: " + " ".join(reasons)
+            else:
+                dec["reasoning"] = "Manual review required based on adjudication controls."
 
     token_usage = conn.execute(
         "SELECT COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
@@ -511,6 +544,21 @@ async def chat_with_claim(claim_id: int, body: ChatRequest, user: dict = Depends
             invoice_summary = "; ".join(summary_parts) if summary_parts else "invoice was parsed but no totals/line items were confidently extracted"
             break
 
+    decision_dict = dict(decision) if decision else None
+    if isinstance(decision_dict, dict):
+        full_result = _safe_json(decision_dict.get("full_result"), {})
+        if isinstance(full_result, dict):
+            for key, value in full_result.items():
+                if key not in decision_dict or not decision_dict.get(key):
+                    decision_dict[key] = value
+        decision_dict.pop("full_result", None)
+        if decision_dict.get("confidence") is None:
+            decision_dict["confidence"] = decision_dict.get("adjudication_confidence")
+        if decision_dict.get("confidence") is None:
+            decision_dict["confidence"] = 0.65
+        if not str(decision_dict.get("reasoning") or "").strip():
+            decision_dict["reasoning"] = "Manual review required based on adjudication and risk checks."
+
     context = {
         "claim_id": claim_id,
         "status": claim_dict.get("status"),
@@ -524,7 +572,7 @@ async def chat_with_claim(claim_id: int, body: ChatRequest, user: dict = Depends
         "parsed_evidence": parsed_evidence,
         "cross_reference": cross_ref_result,
         "invoice_summary": invoice_summary,
-        "decision": dict(decision) if decision else None,
+        "decision": decision_dict,
         "fraud": dict(fraud) if fraud else None,
     }
     
