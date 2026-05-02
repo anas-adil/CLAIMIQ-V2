@@ -67,118 +67,70 @@ def _find_value_near_keyword(text: str, keywords: list, window: int = 200) -> fl
 
 
 def check_lab_vs_description(parsed_results: list, doctor_description: str) -> list:
-    """Finds mismatches between doctor's claims and actual lab values.
-    
-    Uses a flexible keyword-window approach: for each lab result from the parsed
-    image, search the doctor's text for the corresponding keyword (e.g., 'platelet'),
-    then find the nearest number within a 200-char window after that keyword.
-    If the doctor's stated value differs from the lab's actual value by >50%, flag it.
+    """Dynamically compare every Gemini-parsed lab result against the doctor's notes.
+
+    No hardcoded test names — works for any panel Gemini returns. For each result:
+    1. Tokenise the test name into search keywords.
+    2. Check whether those keywords appear in the doctor's text.
+    3. If a numeric value is found near those keywords, compare it to the lab value.
+    4. Flag >50% discrepancy as CRITICAL_CONTRADICTION.
     """
     checks = []
-    if not doctor_description:
+    if not doctor_description or not parsed_results:
         return checks
-    
-    # Map of: (lab test name keywords) → (doctor text search keywords, field label)
-    LAB_CHECKS = [
-        {
-            "lab_keywords": ["platelet", "plt"],
-            "doc_keywords": ["platelet", "plt"],
-            "field": "Platelets",
-            "normalize_thousands": True,
-        },
-        {
-            "lab_keywords": ["hematocrit", "hct"],
-            "doc_keywords": ["hematocrit", "hct"],
-            "field": "Hematocrit",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["hemoglobin", "hgb", "hb "],
-            "doc_keywords": ["hemoglobin", "hgb", "hb "],
-            "field": "Hemoglobin",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["crp", "c-reactive"],
-            "doc_keywords": ["crp", "c-reactive"],
-            "field": "CRP",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["white blood cell", "wbc"],
-            "doc_keywords": ["wbc", "white blood cell", "white cell"],
-            "field": "WBC",
-            "normalize_thousands": True,
-        },
-        # Occupational / toxicology panels
-        {
-            "lab_keywords": ["o-cresol", "cresol"],
-            "doc_keywords": ["o-cresol", "cresol"],
-            "field": "o-Cresol",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["phenol"],
-            "doc_keywords": ["phenol"],
-            "field": "Phenol",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["benzene"],
-            "doc_keywords": ["benzene"],
-            "field": "Benzene",
-            "normalize_thousands": False,
-        },
-        {
-            "lab_keywords": ["toluene"],
-            "doc_keywords": ["toluene"],
-            "field": "Toluene",
-            "normalize_thousands": False,
-        },
-    ]
-    
+
+    doc_lower = doctor_description.lower()
+
     for res in parsed_results:
-        test_name = (res.get("test") or "").lower()
+        test_name = (res.get("test") or "").strip()
         lab_val = extract_number(res.get("value"))
-        
+        flag = str(res.get("flag") or "").upper()
+        unit = (res.get("unit") or "").strip()
+        ref_range = str(res.get("ref_range") or res.get("reporting_limit") or "")
+
         if not test_name or lab_val is None:
             continue
-        
-        for check_def in LAB_CHECKS:
-            # Does this parsed result match this check definition?
-            if not any(kw in test_name for kw in check_def["lab_keywords"]):
-                continue
-                
-            # Search doctor's text for the corresponding value
-            doc_val = _find_value_near_keyword(doctor_description, check_def["doc_keywords"])
-            if doc_val is None:
-                continue
-            
-            # Normalize units if needed (e.g., 15 x10^3 vs 15000)
-            compare_doc = doc_val
-            compare_lab = lab_val
-            if check_def["normalize_thousands"]:
-                if compare_doc > 1000 and compare_lab < 1000:
-                    compare_doc /= 1000
-                if compare_lab > 1000 and compare_doc < 1000:
-                    compare_lab /= 1000
-            
-            # Check for >50% discrepancy
-            diff = abs(compare_doc - compare_lab)
-            baseline = max(compare_doc, compare_lab)
-            if baseline > 0 and diff / baseline > 0.5:
-                checks.append({
-                    "check": "lab_vs_description",
-                    "result": "CRITICAL_CONTRADICTION",
-                    "field": check_def["field"],
-                    "doctor_says": doc_val,
-                    "lab_shows": lab_val,
-                    "note": f"⚠️ FRAUD ALERT: Doctor stated {check_def['field']} ~{doc_val}, "
-                            f"but the attached lab report shows {lab_val}. "
-                            f"Discrepancy: {diff/baseline*100:.0f}%."
-                })
-            break  # Don't check same result against multiple definitions
-            
+
+        # Build search tokens from the test name — split on common delimiters,
+        # keep tokens longer than 2 chars so short abbreviations still work.
+        tokens = [t.lower() for t in re.split(r"[\s\-/()\[\],]+", test_name) if len(t) > 2]
+        if not tokens:
+            continue
+
+        # Only proceed if the doctor actually mentions this test.
+        if not any(tok in doc_lower for tok in tokens):
+            continue
+
+        # Find the numeric value the doctor wrote near the test keywords.
+        doc_val = _find_value_near_keyword(doc_lower, tokens)
+        if doc_val is None:
+            continue
+
+        # Scale-normalise: handle e.g. platelets written as 15 vs lab value 15 000.
+        compare_doc, compare_lab = doc_val, lab_val
+        if compare_doc > 1000 and compare_lab < 1000:
+            compare_doc /= 1000
+        elif compare_lab > 1000 and compare_doc < 1000:
+            compare_lab /= 1000
+
+        diff = abs(compare_doc - compare_lab)
+        baseline = max(compare_doc, compare_lab, 1e-9)
+        if diff / baseline > 0.5:
+            flag_label = "ELEVATED" if flag in ("H", "ELEVATED", "HIGH", "ABOVE") else "discrepant"
+            ref_str = f", limit {ref_range}" if ref_range else ""
+            checks.append({
+                "check": "lab_vs_description",
+                "result": "CRITICAL_CONTRADICTION",
+                "field": test_name,
+                "doctor_says": f"{doc_val} {unit}".strip(),
+                "lab_shows": f"{lab_val} {unit} ({flag_label}{ref_str})".strip(),
+                "note": (
+                    f"⚠️ FRAUD ALERT: Doctor stated {test_name} ≈ {doc_val} {unit}, "
+                    f"but lab report shows {lab_val} {unit} ({flag_label}{ref_str}). "
+                    f"Discrepancy: {diff / baseline * 100:.0f}%."
+                ),
+            })
+
     return checks
 
 def check_invoice_vs_claim(parsed_invoice: dict, claimed_amount: float) -> dict:
