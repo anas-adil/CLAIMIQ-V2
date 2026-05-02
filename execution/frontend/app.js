@@ -656,6 +656,33 @@ function handleFileSelect(inputId, displayId) {
     }
 }
 
+async function imageFileToOptimizedDataUrl(file, maxDim = 1280, quality = 0.72) {
+    const originalDataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.readAsDataURL(file);
+    });
+
+    if (!file.type.startsWith("image/")) return originalDataUrl;
+
+    const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = originalDataUrl;
+    });
+
+    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+}
+
 // --- CLAIM SUBMISSION PIPELINE ---
 async function submitClaim() {
     if (!currentUser || (currentUser.role !== "CLINIC_USER" && currentUser.role !== "SYSTEM_ADMIN")) {
@@ -695,20 +722,12 @@ async function submitClaim() {
     try {
         let evidenceBase64 = null;
         if (fileEvidence && fileEvidence.type.startsWith('image/')) {
-            evidenceBase64 = await new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.onload = e => resolve(e.target.result);
-                reader.readAsDataURL(fileEvidence);
-            });
+            evidenceBase64 = await imageFileToOptimizedDataUrl(fileEvidence);
         }
 
         let invoiceBase64 = null;
         if (fileBill && fileBill.type.startsWith('image/')) {
-            invoiceBase64 = await new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.onload = e => resolve(e.target.result);
-                reader.readAsDataURL(fileBill);
-            });
+            invoiceBase64 = await imageFileToOptimizedDataUrl(fileBill);
         }
 
         if (fileBill || fileEvidence) {
@@ -744,6 +763,12 @@ async function submitClaim() {
             visit_date: visitDate,
             total_amount_myr: totalAmount
         };
+
+        const approxBytes = new Blob([JSON.stringify(payload)]).size;
+        const maxPayloadBytes = 4.2 * 1024 * 1024; // stay below typical serverless request limits
+        if (approxBytes > maxPayloadBytes) {
+            throw new Error("Attached files are too large after compression. Please upload smaller images.");
+        }
 
         // Step 0: Intake
         const initResponse = await apiFetch(`/claims/submit`, {
