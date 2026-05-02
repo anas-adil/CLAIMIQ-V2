@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, constr
 from typing import Optional, List
 from datetime import datetime, timezone
-import bcrypt
+
 import jwt
 
 import database as db
@@ -81,7 +81,8 @@ async def login(body: LoginRequest):
         raise HTTPException(401, "Invalid email or password")
     
     try:
-        password_ok = bcrypt.checkpw(body.password.encode(), user["password_hash"].encode())
+        input_hash = hashlib.sha256(body.password.encode()).hexdigest()
+        password_ok = (input_hash == user["password_hash"])
     except Exception:
         raise HTTPException(401, "Invalid email or password")
     if not password_ok:

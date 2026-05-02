@@ -15,7 +15,7 @@ import os
 import json
 import sqlite3
 import logging
-import bcrypt
+import hashlib
 from datetime import datetime, date
 from typing import Optional
 from dotenv import load_dotenv
@@ -262,7 +262,7 @@ def _ensure_demo_users(conn: sqlite3.Connection):
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchall()
     if not rows:
         return
-    pwd_hash = bcrypt.hashpw(b"Demo@123", bcrypt.gensalt(12)).decode("utf-8")
+    pwd_hash = hashlib.sha256(b"Demo@123").hexdigest()
     demo_users = [
         ("usr-admin", "admin@demo.my", "System Admin", "SYSTEM_ADMIN", "SYSTEM", None, None),
         ("usr-clinic", "clinic@demo.my", "Clinic User", "CLINIC_USER", "CLINIC", "CLINIC-ALPHA", None),
