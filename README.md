@@ -1,97 +1,120 @@
-# ClaimIQ: Deterministic Clinical Adjudication & Fraud Intelligence
+<div align="center">
+  <img src="https://raw.githubusercontent.com/anas-adil/CLAIMIQ-V2/main/media__1777748604449.png" alt="ClaimIQ Logo" width="200" style="border-radius: 12px; margin-bottom: 20px;"/>
+  <h1>ClaimIQ</h1>
+  <p><strong>Deterministic Clinical Adjudication & Fraud Intelligence Platform</strong></p>
+  <p><i>UMHackathon 2026 Submission • Built with Z.AI ILMU & MedGemma Vision</i></p>
+</div>
+
+---
+
+## 🚀 Live Demo
+**Production Environment (Vercel):** [https://tpa-blue.vercel.app](https://tpa-blue.vercel.app)
+*(Demo credentials are pre-filled on the login screen!)*
 
 ## 📺 Pitching Video
 **Watch our full pitching video here:** 
-👉 **[Link to Pitching Video (Google Drive/Cloud Storage)]** 
-*(Participants: Replace this placeholder with your actual recording link)*
+👉 **[Insert Pitching Video Link Here]**
 
 ---
 
-## 🚀 Key Critical Component: Z AI GLM Integration
-**ClaimIQ is powered primarily by Z AI’s GLM (General Language Model) Architecture.** 
+## 🧠 The Problem & Our Solution
+Malaysian Third-Party Administrators (TPAs) lose millions annually to **Fraud, Waste, and Abuse (FWA)**, primarily through manual claims processing that fails to detect subtle clinical contradictions (e.g., claiming expensive treatments for mild conditions, or billing phantom services).
 
-As per the competition requirements, Z AI GLM serves as the central brain and main critical component of our solution. We utilize GLM for:
-*   **Clinical Adjudication**: Processing extracted clinical data against complex medical policies and RAG-based insurance rules.
-*   **Medical Coding**: Mapping doctor descriptions to standard ICD-10 and CPT codes.
-*   **Fraud & Anomaly Detection**: Identifying clinical discrepancies between objective lab results and subjective clinical notes.
-*   **GP Advisory**: Generating human-readable, professional guidance for clinics and patients.
+**ClaimIQ** is a next-generation TPA platform designed to eliminate unsafe fallback behaviors and automate the clinical adjudication pipeline with **100% auditability**.
 
-The system is architected to be **deterministic**—the AI provides decision-support and risk-scoring, but enforces a "Doctor-First" safety freeze where all negative outcomes (denials) are gated for human clinical sign-off.
-
----
-
-## 📝 Overview
-ClaimIQ is a next-generation Third Party Administrator (TPA) platform designed to eliminate unsafe fallback behaviors and automate the clinical adjudication pipeline with 100% auditability. 
-
-### Core Features:
-*   **Multi-Modal Evidence Parsing**: Utilizes Vision Agents (Gemini/MedGemma) to extract structured data from X-rays, Lab Reports, and Invoices.
-*   **"Double-Agent" Architecture**: Separates Vision Extraction from Reasoning Adjudication (GLM) for maximum reliability.
-*   **Safety-First Design**: Automated "Safety Freeze" prevents autonomous denials without human review.
-*   **Immutable Audit Trail**: Every decision state change and AI reasoning step is logged with SHA-256 integrity hashes.
-*   **Anti-Fraud Engine**: Detects clinical mismatches (e.g., Doctor claims severe dengue, but Lab Report shows normal platelets).
+### 🌟 Core Features:
+1. **Multi-Modal Evidence Parsing ("MedGemma")**: Utilizes Vision Agents to extract structured data from complex, unstructured Malaysian medical documents (X-rays, Lab Reports, handwritten Invoices).
+2. **"Double-Agent" Architecture**: Separates Vision Extraction (MedGemma) from Reasoning Adjudication (Z.AI ILMU) for maximum reliability and to prevent AI hallucinations.
+3. **Cross-Reference Fraud Engine**: Deterministically compares Doctor's Notes vs. Lab Results to flag identity mismatches and clinical contradictions (e.g., "Doctor claims severe dengue, but Lab Report shows normal platelets").
+4. **Safety-First Design**: An automated "Safety Freeze" prevents autonomous denials. All negative outcomes are gated for human clinical sign-off, ensuring 100% regulatory compliance.
+5. **Immutable Audit Trail**: Every decision state change and AI reasoning step is logged deterministically.
 
 ---
 
-## 🛠 Architecture
-ClaimIQ operates on a 3-layer architecture:
-1.  **Ingestion & Triage**: Validating image quality (blur detection) and identifying document types.
-2.  **Evidence Extraction**: Converting unstructured images into structured JSON medical data.
-3.  **GLM Intelligence Layer**: 
-    *   **Reasoning**: Adjudicating against benefit tiers.
-    *   **Cross-Referencing**: Validating the bill against the clinical evidence.
-    *   **Fraud Scoring**: Generating a risk level based on clinical consistency.
+## ⚡ Key Critical Component: Z.AI ILMU Integration
+**ClaimIQ is powered primarily by Z.AI’s ILMU `nemo-super` Architecture.** 
+
+As per the competition requirements, Z.AI serves as the central brain and main critical component of our solution. We utilize it for:
+* **Clinical Adjudication**: Processing extracted clinical data against complex medical policies and RAG-based insurance rules.
+* **Medical Coding**: Mapping doctor descriptions to standard ICD-10 and CPT codes automatically.
+* **Fraud & Anomaly Detection**: Identifying sophisticated fraud patterns like Upcoding and Phantom Billing.
+* **GP Advisory**: Generating human-readable, professional guidance (in English & Bahasa Malaysia) for clinics to improve documentation.
+
+---
+
+## 🛠 Technical Architecture
+ClaimIQ operates on a sophisticated, serverless-ready 3-layer architecture:
+1. **Ingestion & Triage**: Validating image quality and identifying document types.
+2. **Evidence Extraction**: Converting unstructured images into structured JSON medical data.
+3. **Intelligence Layer**: Adjudicating against benefit tiers, cross-referencing evidence, and generating risk scores.
+
+### Tech Stack
+* **Backend**: Python 3.10, FastAPI, SQLite (ephemeral `/tmp` storage for Vercel Serverless compatibility)
+* **Frontend**: Vanilla JS, HTML5, CSS3 (Glassmorphism & Dynamic Dashboards)
+* **AI Models**: Z.AI ILMU (`nemo-super`), Google Gemini (Vision)
+* **Deployment**: Vercel CI/CD
 
 ---
 
 ## 📂 Project Structure
-*   `execution/`: Core backend logic (Python/FastAPI) and Frontend (Vanilla JS/CSS).
-*   `directives/`: Standard Operating Procedures for system logic.
-*   `docs/`: Competition deliverables (PRD, SAD, TAD, and Pitch Deck).
-*   `database.py`: Immutable audit logs and claim state management.
+* `execution/`: Core backend logic and Frontend portal.
+  * `api_server.py`: FastAPI serverless endpoints.
+  * `claims_processor.py`: The deterministic adjudication pipeline.
+  * `glm_client.py`: Core AI integration and prompt engineering.
+  * `frontend/`: The stunning UI dashboards.
+* `docs/`: Competition deliverables (PRD, SAD, TAD, QATD, Pitch Deck).
 
 ---
 
-## 🏁 Getting Started
+## 🏁 Getting Started (Local Development)
 
 ### Prerequisites
-*   Python 3.10+
-*   Z AI GLM API Key
-*   Gemini API Key (for Vision)
+* Python 3.10+
+* Z.AI ILMU API Key
+* Gemini API Key
 
 ### Installation
-1. Clone the repository.
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/anas-adil/CLAIMIQ-V2.git
+   cd CLAIMIQ-V2
+   ```
 2. Install dependencies:
    ```bash
-   pip install fastapi uvicorn openai google-generativeai pydantic pillow
+   pip install fastapi uvicorn openai google-generativeai pydantic python-multipart
    ```
-3. Set up your `.env` file (see `.env.example` for required keys).
+3. Set up your `.env` file (see `.env.example` for required keys):
+   ```env
+   GEMINI_API_KEY=your_key
+   ILMU_API_KEY=your_key
+   ILMU_BASE_URL=https://ilmu.zai.example/v1
+   ILMU_MODEL=nemo-super
+   ```
 4. Run the server:
    ```bash
-   python execution/api_server.py
+   cd execution
+   python api_server.py
    ```
+5. Open `http://localhost:8000` in your browser.
 
 ---
 
-## 📄 Documentation (In `docs/` Folder)
-The following mandatory files are available in the `/docs` directory:
-1.  **PRD.pdf** (Product Requirements Document)
-2.  **SAD.pdf** (Software Architecture Document)
-3.  **TAD.pdf** (Technical Architecture Document)
-4.  **Pitch_Deck.pdf**
+## ☁️ Deployment (Vercel)
+This repository is configured for seamless deployment to Vercel via the `vercel.json` and `.vercel` configurations. 
 
----
-© 2026 ClaimIQ Team | Developed for the Preliminary Round Submission.
+1. Connect this GitHub repository to your Vercel Dashboard.
+2. Ensure you add the API Keys (`GEMINI_API_KEY`, `ILMU_API_KEY`, etc.) to the **Environment Variables** section in your Vercel Project Settings.
+3. Deploy! The system is configured to safely route SQLite databases to `/tmp` to support Vercel's read-only serverless filesystem.
 
 ---
 
-## CI/CD to Vercel (Auto Deploy)
-This repo is configured to:
-1. Run tests on every pull request and push (`.github/workflows/ci.yml`).
-2. Deploy to Vercel Production automatically after tests pass on `main`/`master`.
+## 📄 Documentation
+The following mandatory files are available in the repository:
+1. **Business Proposal** (`ClaimIQ_Business_Proposal.md`)
+2. **QATD** (Quality Assurance Testing Document)
+3. **PRD** (Product Requirements Document)
+4. **SAD** (Software Architecture Document)
+5. **TAD** (Technical Architecture Document)
 
-Set these GitHub repository secrets before using auto-deploy:
-1. `VERCEL_TOKEN`
-2. `VERCEL_ORG_ID`
-3. `VERCEL_PROJECT_ID`
-
-You can get `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` from `.vercel/project.json` after running `vercel link`.
+---
+*© 2026 ClaimIQ Team | Developed for the UMHackathon 2026 Submission.*
