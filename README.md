@@ -81,3 +81,17 @@ The following mandatory files are available in the `/docs` directory:
 
 ---
 © 2026 ClaimIQ Team | Developed for the Preliminary Round Submission.
+
+---
+
+## CI/CD to Vercel (Auto Deploy)
+This repo is configured to:
+1. Run tests on every pull request and push (`.github/workflows/ci.yml`).
+2. Deploy to Vercel Production automatically after tests pass on `main`/`master`.
+
+Set these GitHub repository secrets before using auto-deploy:
+1. `VERCEL_TOKEN`
+2. `VERCEL_ORG_ID`
+3. `VERCEL_PROJECT_ID`
+
+You can get `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` from `.vercel/project.json` after running `vercel link`.

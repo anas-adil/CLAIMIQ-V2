@@ -78,7 +78,11 @@ async def login(body: LoginRequest):
     if not user:
         raise HTTPException(401, "Invalid email or password")
     
-    if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+    try:
+        password_ok = bcrypt.checkpw(body.password.encode(), user["password_hash"].encode())
+    except Exception:
+        raise HTTPException(401, "Invalid email or password")
+    if not password_ok:
         raise HTTPException(401, "Invalid email or password")
         
     payload = {
@@ -206,9 +210,16 @@ async def get_claims_queue(
         params.append(f"%{clinic}%")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = conn.execute(
-        f"SELECT id, patient_name, patient_ic, visit_date, created_at, clinic_name, clinic_id, "
-        f"diagnosis, icd10_code, total_amount_myr, status "
-        f"FROM claims {where} ORDER BY created_at DESC LIMIT ?",
+        f"SELECT c.id, c.patient_name, c.patient_ic, c.visit_date, c.created_at, c.clinic_name, c.clinic_id, "
+        f"c.diagnosis, c.icd10_code, c.total_amount_myr, c.status, "
+        f"COALESCE(tu.total_tokens, 0) AS ai_total_tokens, COALESCE(tu.total_cost_myr, 0) AS ai_total_cost_myr "
+        f"FROM claims c "
+        f"LEFT JOIN ("
+        f"  SELECT claim_id, SUM(total_tokens) AS total_tokens, SUM(cost_myr) AS total_cost_myr "
+        f"  FROM token_usage WHERE claim_id IS NOT NULL GROUP BY claim_id"
+        f") tu ON tu.claim_id = c.id "
+        f"{where.replace('WHERE ', 'WHERE c.') if where else ''} "
+        f"ORDER BY c.created_at DESC LIMIT ?",
         params + [max(1, min(limit, 500))],
     ).fetchall()
     conn.close()
@@ -245,6 +256,21 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
 
     fraud = conn.execute("SELECT * FROM fraud_scores WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
     res["fraud"] = dict(fraud) if fraud else None
+
+    token_usage = conn.execute(
+        "SELECT COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+        "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+        "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+        "COALESCE(SUM(cost_myr), 0) AS total_cost_myr "
+        "FROM token_usage WHERE claim_id=?",
+        (claim_id,),
+    ).fetchone()
+    res["ai_usage"] = dict(token_usage) if token_usage else {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "total_cost_myr": 0.0,
+    }
 
     # advisory — needed by the GP Advisory card in the claim modal
     advisory = conn.execute("SELECT * FROM advisories WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
@@ -393,8 +419,28 @@ async def metrics(user: dict = Depends(get_current_user)):
     usage = glm_client.get_token_metrics()
     summary = db.get_analytics_summary()
     total_claims = summary.get("total_claims") or 0
-    total_tokens = usage.get("total_tokens") or 0
-    usage["avg_tokens_per_claim"] = round(total_tokens / total_claims, 2) if total_claims else 0.0
+
+    conn = db.get_db()
+    token_totals = conn.execute(
+        "SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+        "COALESCE(SUM(cost_myr), 0) AS total_cost_myr, "
+        "COUNT(DISTINCT claim_id) AS claims_with_usage "
+        "FROM token_usage WHERE claim_id IS NOT NULL"
+    ).fetchone()
+    conn.close()
+
+    db_total_tokens = int(token_totals["total_tokens"] or 0)
+    db_total_cost_myr = float(token_totals["total_cost_myr"] or 0.0)
+    claims_with_usage = int(token_totals["claims_with_usage"] or 0)
+    live_total_tokens = int(usage.get("total_tokens") or 0)
+    effective_total_tokens = db_total_tokens if db_total_tokens > 0 else live_total_tokens
+
+    usage["total_tokens"] = effective_total_tokens
+    usage["total_cost_myr"] = db_total_cost_myr
+    usage["claims_with_usage"] = claims_with_usage
+    usage["avg_tokens_per_claim"] = round(effective_total_tokens / total_claims, 2) if total_claims else 0.0
+    usage["avg_cost_per_claim_myr"] = round(db_total_cost_myr / total_claims, 8) if total_claims else 0.0
+    usage["avg_cost_per_processed_claim_myr"] = round(db_total_cost_myr / claims_with_usage, 8) if claims_with_usage else 0.0
     return usage
 
 @app.get("/api/analytics/summary")

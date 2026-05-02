@@ -134,19 +134,6 @@ def _call_glm(
                     conn.close()
                 except Exception as db_e:
                     logger.error(f"Failed to log token usage to DB: {db_e}")
-                try:
-                    import database as db
-                    conn = db.get_db()
-                    cost = (response.usage.total_tokens / 1000) * 0.00006
-                    conn.execute(
-                        "INSERT INTO token_usage (id, claim_id, prompt_tokens, completion_tokens, total_tokens, cost_myr) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (os.urandom(16).hex(), claim_id, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens, cost)
-                    )
-                    conn.commit()
-                    conn.close()
-                except Exception as db_e:
-                    logger.error(f"Failed to log token usage to DB: {db_e}")
             
             # Robust JSON cleaning
             if json_mode and content:
@@ -485,9 +472,9 @@ def extract_claim_data(raw_text: str, claim_id: int = None) -> dict:
     return data
 
 
-def assign_medical_codes(claim_data: dict) -> dict:
+def assign_medical_codes(claim_data: dict, claim_id: int = None) -> dict:
     """GLM Fn 2: Structured claim → ICD-10/CPT codes."""
-    result = _call_glm(CODING_SYSTEM, f"Assign codes:\n\n{json.dumps(claim_data, indent=2)}", temperature=0.2)
+    result = _call_glm(CODING_SYSTEM, f"Assign codes:\n\n{json.dumps(claim_data, indent=2)}", temperature=0.2, claim_id=claim_id)
     return json.loads(result)
 
 
@@ -525,13 +512,13 @@ def detect_fraud_patterns(claim: dict, historical_context: Optional[str] = None,
     return json.loads(result)
 
 
-def generate_gp_advisory(decision: dict, claim_data: dict) -> dict:
+def generate_gp_advisory(decision: dict, claim_data: dict, claim_id: int = None) -> dict:
     """GLM Fn 5: Plain-language GP advisory."""
     validation_res = claim_data.get("_validation_result")
     prompt = f"## Decision\n{json.dumps(decision, indent=2)}\n\n## Claim\n{json.dumps(claim_data, indent=2)}"
     if validation_res:
         prompt += f"\n\n## Deterministic Validation Findings\n{json.dumps(validation_res, indent=2)}"
-    result = _call_glm(ADVISORY_SYSTEM, f"Generate advisory:\n\n{prompt}", temperature=0.5)
+    result = _call_glm(ADVISORY_SYSTEM, f"Generate advisory:\n\n{prompt}", temperature=0.5, claim_id=claim_id)
     return json.loads(result)
 
 
@@ -595,12 +582,13 @@ CHAT_SYSTEM = (
 )
 
 
-def validate_claim_pre_adjudication(claim_data: dict) -> dict:
+def validate_claim_pre_adjudication(claim_data: dict, claim_id: int = None) -> dict:
     """GLM Fn 6: Clinical pre-validation — checks dx/procedure/medication consistency."""
     result = _call_glm(
         VALIDATE_SYSTEM,
         f"Validate clinical consistency:\n\n{json.dumps(claim_data, indent=2)}",
         temperature=0.1,
+        claim_id=claim_id,
     )
     return json.loads(result)
 

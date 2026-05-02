@@ -3,35 +3,19 @@ openai>=1.30.0
 
 # Backend
 fastapi>=0.111.0
-uvicorn[standard]>=0.30.0
 python-dotenv>=1.0.0
 python-multipart>=0.0.9
-
-# Vector DB + Embeddings
-faiss-cpu>=1.8.0
-sentence-transformers>=3.0.0
 
 # Data
 pydantic>=2.7.0
 aiofiles>=24.1.0
 
-# Local multimodal inference (MedGemma)
-transformers>=5.6.2
-huggingface-hub>=1.12.0
-accelerate>=1.1.0
+# External multimodal inference/API
+requests>=2.32.0
 pillow>=10.0.0
-
-# Graph-based fraud detection
-networkx>=3.3
-
-# Denial prediction model
-scikit-learn>=1.5.0
 
 # PDF EOB generation
 reportlab>=4.2.0
-
-# Testing / CI
-pytest>=8.2.0
 
 # Auth
 PyJWT>=2.8.0

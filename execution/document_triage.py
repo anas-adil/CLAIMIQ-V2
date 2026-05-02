@@ -9,9 +9,11 @@ Responsibilities:
 import base64
 import io
 import logging
-import cv2
-import numpy as np
 from PIL import Image
+try:
+    import cv2
+except Exception:  # pragma: no cover - optional dependency
+    cv2 = None
 
 import medgemma_client
 
@@ -44,23 +46,28 @@ def check_image_quality(image_b64: str) -> dict:
             if quality == "GOOD": quality = "POOR"
             warnings.append(f"Low resolution ({width}x{height})")
             
-        # Blur detection using OpenCV variance of Laplacian
-        # Safely handle various image modes (RGBA, L, CMYK, etc.)
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        if blur_score < 100:
-            if quality in ("GOOD", "POOR"): quality = "BLURRY"
-            warnings.append(f"Image appears blurry (score: {blur_score:.1f})")
+        blur_score = None
+        # Blur detection via OpenCV when available.
+        if cv2 is not None:
+            import numpy as np
+            # Safely handle various image modes (RGBA, L, CMYK, etc.)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+            blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            if blur_score < 100:
+                if quality in ("GOOD", "POOR"):
+                    quality = "BLURRY"
+                warnings.append(f"Image appears blurry (score: {blur_score:.1f})")
+        else:
+            warnings.append("Blur check skipped (opencv not installed)")
             
         return {
             "quality": quality,
             "details": {
                 "resolution": f"{width}x{height}",
-                "blur_score": round(blur_score, 1),
+                "blur_score": round(blur_score, 1) if blur_score is not None else None,
                 "file_size_kb": round(file_size_kb, 1)
             },
             "warnings": warnings

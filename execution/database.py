@@ -15,6 +15,7 @@ import os
 import json
 import sqlite3
 import logging
+import bcrypt
 from datetime import datetime, date
 from typing import Optional
 from dotenv import load_dotenv
@@ -22,7 +23,14 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger("claimiq.db")
 
-DB_PATH = os.getenv("DB_PATH", ".tmp/claimiq.db")
+# Serverless runtimes (Vercel/AWS Lambda) have writable temp space at /tmp.
+# Prefer /tmp there; use local .tmp path in normal dev unless DB_PATH is set.
+if os.getenv("DB_PATH"):
+    DB_PATH = os.getenv("DB_PATH")
+elif os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT"):
+    DB_PATH = "/tmp/claimiq.db"
+else:
+    DB_PATH = ".tmp/claimiq.db"
 os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 # 10-state lifecycle (matches real TPA workflow)
@@ -249,6 +257,25 @@ INSERT OR IGNORE INTO carc_codes VALUES ('MA130', 'Patient cannot be identified 
 
 _SCHEMA_INITIALIZED = False
 
+
+def _ensure_demo_users(conn: sqlite3.Connection):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchall()
+    if not rows:
+        return
+    pwd_hash = bcrypt.hashpw(b"Demo@123", bcrypt.gensalt(12)).decode("utf-8")
+    demo_users = [
+        ("usr-admin", "admin@demo.my", "System Admin", "SYSTEM_ADMIN", "SYSTEM", None, None),
+        ("usr-clinic", "clinic@demo.my", "Clinic User", "CLINIC_USER", "CLINIC", "CLINIC-ALPHA", None),
+        ("usr-proc", "processor@demo.my", "TPA Processor", "TPA_PROCESSOR", "TPA", None, "TPA-DEMO"),
+        ("usr-fraud", "fraud@demo.my", "Fraud Analyst", "TPA_FRAUD_ANALYST", "TPA", None, "TPA-DEMO"),
+    ]
+    for uid, email, full_name, role, tenant_type, clinic_id, tpa_id in demo_users:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (id, email, password_hash, full_name, role, tenant_type, clinic_id, tpa_id, is_active) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)",
+            (uid, email, pwd_hash, full_name, role, tenant_type, clinic_id, tpa_id),
+        )
+
 def _ensure_migration_table(conn: sqlite3.Connection):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -417,14 +444,31 @@ def _migrate_schema(conn: sqlite3.Connection):
         conn.commit()
 
 def get_db() -> sqlite3.Connection:
-    global _SCHEMA_INITIALIZED
+    global _SCHEMA_INITIALIZED, DB_PATH
     os.makedirs(os.path.dirname(DB_PATH) if os.path.dirname(DB_PATH) else ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=15.0)
     conn.row_factory = sqlite3.Row
     if not _SCHEMA_INITIALIZED:
-        conn.executescript(SCHEMA)
-        _migrate_schema(conn)
-        _SCHEMA_INITIALIZED = True
+        try:
+            conn.executescript(SCHEMA)
+            _migrate_schema(conn)
+            _ensure_demo_users(conn)
+            conn.commit()
+            _SCHEMA_INITIALIZED = True
+        except sqlite3.OperationalError as e:
+            if "readonly" not in str(e).lower():
+                raise
+            # Fallback for serverless envs where configured DB_PATH points to read-only FS.
+            conn.close()
+            DB_PATH = "/tmp/claimiq.db"
+            os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+            conn = sqlite3.connect(DB_PATH, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(SCHEMA)
+            _migrate_schema(conn)
+            _ensure_demo_users(conn)
+            conn.commit()
+            _SCHEMA_INITIALIZED = True
     return conn
 
 def acquire_processing_lock(claim_id: int) -> bool:

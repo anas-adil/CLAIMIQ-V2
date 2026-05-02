@@ -61,7 +61,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
         try:
             # Step 3: Extraction (Needed first to get data for Scrub/Eligibility)
             logger.info(f"[{claim_id}] Step 3: Extracting claim data...")
-            extracted = glm_client.extract_claim_data(raw_text)
+            extracted = glm_client.extract_claim_data(raw_text, claim_id=claim_id)
 
             # Merge patient-submitted fields (from initial claim submission) as ground truth.
             # These were stored in extracted_data during submit_claim and should NOT be
@@ -274,12 +274,12 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
 
             # Step 4: Clinical Validation
             logger.info(f"[{claim_id}] Step 4: Clinical Validation...")
-            clinical_val = glm_client.validate_claim_pre_adjudication(extracted)
+            clinical_val = glm_client.validate_claim_pre_adjudication(extracted, claim_id=claim_id)
             result["steps"]["validation"] = clinical_val
 
             # Step 5: Coding
             logger.info(f"[{claim_id}] Step 5: Medical Coding...")
-            coded = glm_client.assign_medical_codes(extracted)
+            coded = glm_client.assign_medical_codes(extracted, claim_id=claim_id)
             db.update_claim(claim_id, coded_data=json.dumps(coded), icd10_code=coded.get("primary_diagnosis_code"))
             result["steps"]["coding"] = coded
             result["steps"]["drg"] = drg_mapper.map_icd_to_drg(coded.get("primary_diagnosis_code"))
@@ -296,7 +296,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             logger.info(f"[{claim_id}] Step 6: Policy Adjudication...")
             policy_context = rag_engine.get_policy_context(extracted)
             full_claim_with_evidence = {**full_claim, "_raw_evidence_packet": raw_text}
-            decision = glm_client.adjudicate_claim(full_claim_with_evidence, policy_context)
+            decision = glm_client.adjudicate_claim(full_claim_with_evidence, policy_context, claim_id=claim_id)
             decision["denial_prediction"] = denial_predictor.predict_denial(full_claim_with_evidence)
             result["steps"]["denial_predictor"] = decision["denial_prediction"]
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=0)
@@ -312,7 +312,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             
             db.update_claim(claim_id, patient_mc_risk_score=patient_mc_risk, clinic_mc_risk_score=clinic_mc_risk)
             
-            fraud = glm_client.detect_fraud_patterns(full_claim)
+            fraud = glm_client.detect_fraud_patterns(full_claim, claim_id=claim_id)
             graph_signal = fraud_graph.analyze_claim_network(extracted)
             fraud["graph_signal"] = graph_signal
             base_score = float(fraud.get("fraud_risk_score") or 0.0)
@@ -345,7 +345,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             logger.info(f"[{claim_id}] Step 8: Generating GP Advisory...")
             advisory_input = dict(extracted)
             advisory_input["_validation_result"] = full_claim.get("_validation_result")
-            advisory = glm_client.generate_gp_advisory(decision, advisory_input)
+            advisory = glm_client.generate_gp_advisory(decision, advisory_input, claim_id=claim_id)
             db.insert_advisory(claim_id, advisory)
             result["steps"]["advisory"] = advisory
 

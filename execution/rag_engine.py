@@ -8,7 +8,6 @@ policy clauses, and formats context for GLM prompt injection.
 import os
 import json
 import logging
-import numpy as np
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -27,9 +26,13 @@ def _get_embedding_model():
     """Lazy-load sentence transformer model."""
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Embedding model loaded: all-MiniLM-L6-v2")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Embedding model loaded: all-MiniLM-L6-v2")
+        except Exception as e:
+            logger.warning(f"Sentence-transformers unavailable; RAG semantic search disabled: {e}")
+            return None
     return _model
 
 
@@ -39,8 +42,11 @@ def build_index(documents: list[dict]):
     Each doc: {"id": str, "title": str, "content": str, "category": str}
     """
     import faiss
+    import numpy as np
 
     model = _get_embedding_model()
+    if model is None:
+        raise RuntimeError("Sentence-transformers unavailable; cannot build FAISS index.")
     texts = [d["content"] for d in documents]
     embeddings = model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
 
@@ -60,7 +66,11 @@ def build_index(documents: list[dict]):
 def load_index():
     """Load pre-built FAISS index and documents."""
     global _index, _documents
-    import faiss
+    try:
+        import faiss
+    except Exception as e:
+        logger.warning(f"FAISS unavailable; RAG index disabled: {e}")
+        return None
 
     idx_path = os.path.join(INDEX_PATH, "policy.index")
     doc_path = os.path.join(INDEX_PATH, "documents.json")
@@ -85,6 +95,9 @@ def search(query: str, top_k: int = 5) -> list[dict]:
         return []
 
     model = _get_embedding_model()
+    if model is None:
+        return []
+    import numpy as np
     q_emb = model.encode([query], normalize_embeddings=True).astype(np.float32)
     scores, indices = _index.search(q_emb, top_k)
 

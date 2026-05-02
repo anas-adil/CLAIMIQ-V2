@@ -18,6 +18,15 @@ def _get_jwt_secret():
         return "hackathon_super_secret_fallback_key_that_is_long_enough_64_chars_min!"
     return secret
 
+
+def _allow_stateless_jwt_fallback() -> bool:
+    """
+    Allow valid JWTs even if the backing session row is missing.
+    This avoids random logouts in multi-instance/serverless deployments where
+    sqlite session state is not shared across instances.
+    """
+    return os.getenv("ALLOW_STATELESS_JWT_FALLBACK", "1").strip().lower() not in {"0", "false", "no"}
+
 def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials = Security(security)):
     # Keep auth strict in runtime, but allow predictable test fallback so
     # endpoint tests can run without generating JWT/session rows.
@@ -49,9 +58,13 @@ def get_current_user(request: Request, credentials: HTTPAuthorizationCredentials
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     session = db.execute("SELECT revoked FROM sessions WHERE token_hash=?", (token_hash,)).fetchone()
     db.close()
-    
-    if not session or session["revoked"] == 1:
+
+    # Respect explicit revocation whenever we can see the session row.
+    if session and session["revoked"] == 1:
         raise HTTPException(401, "Session revoked")
+    # If the session row is missing, optionally fall back to stateless JWT auth.
+    if not session and not _allow_stateless_jwt_fallback():
+        raise HTTPException(401, "Session missing")
         
     request.state.user = payload
     return payload

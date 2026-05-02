@@ -229,6 +229,9 @@ function mapDrgFromIcd(icd) {
 }
 function safeArray(v) { return Array.isArray(v) ? v : []; }
 function safeObj(v) { return v && typeof v === "object" ? v : {}; }
+function isClaimCompleted(status) {
+    return ["APPROVED", "DENIED", "APPEAL_APPROVED", "APPEAL_DENIED", "REFERRED", "FRAUD_FLAG"].includes(status);
+}
 
 // --- DASHBOARD ---
 async function loadDashboard() {
@@ -260,6 +263,8 @@ async function loadDashboard() {
         const approvedAmt = summary.total_approved_myr || 0;
         document.getElementById("statApprovedAmt").textContent = approvedAmt < 1000 ? approvedAmt.toFixed(2) : (approvedAmt/1000).toFixed(1) + "k";
         document.getElementById("statTokens").textContent = (metrics.total_tokens || 0).toLocaleString();
+        document.getElementById("statAiCostTotal").textContent = Number(metrics.total_cost_myr || 0).toFixed(6);
+        document.getElementById("statAiCostPerClaim").textContent = Number(metrics.avg_cost_per_claim_myr || 0).toFixed(8);
 
         renderRecentClaims(claims.claims);
         renderCharts(summary);
@@ -390,13 +395,16 @@ async function loadClaims() {
         </tr></thead><tbody>`;
 
         res.claims.forEach(c => {
+            const usageLine = isClaimCompleted(c.status) && (Number(c.ai_total_tokens || 0) > 0)
+                ? `<br><span style="font-size:0.75rem;color:var(--text-secondary)">AI: ${Number(c.ai_total_tokens || 0).toLocaleString()} tok | RM ${(Number(c.ai_total_cost_myr || 0)).toFixed(6)}</span>`
+                : "";
             html += `<tr class="tr-clickable" onclick="openClaim(${c.id})">
                 <td class="td-mono">#${c.id}</td>
                 <td>${fmtDate(c.created_at)}</td>
                 <td>${c.clinic_name || 'N/A'}</td>
                 <td>${c.patient_name || 'N/A'}<br><span style="font-size:0.75rem;color:var(--text-secondary)">${c.patient_ic || ''}</span></td>
                 <td>${c.diagnosis || 'N/A'}<br><span style="font-size:0.75rem;color:var(--text-secondary)">${c.icd10_code || ''}</span></td>
-                <td class="td-mono">${fmtMYR(c.total_amount_myr || 0)}</td>
+                <td class="td-mono">${fmtMYR(c.total_amount_myr || 0)}${usageLine}</td>
                 <td>
                     <span class="badge badge-${c.status || 'UNKNOWN'}">${c.status || 'UNKNOWN'}</span>
                     <div class="lifecycle-bar">
@@ -593,11 +601,14 @@ async function loadGPPortal() {
         </tr></thead><tbody>`;
 
         data.forEach(c => {
+            const usageLine = isClaimCompleted(c.status) && (Number(c.ai_total_tokens || 0) > 0)
+                ? `<br><span style="font-size:0.75rem;color:var(--text-secondary)">${Number(c.ai_total_tokens || 0).toLocaleString()} tok | RM ${(Number(c.ai_total_cost_myr || 0)).toFixed(6)}</span>`
+                : "";
             html += `<tr class="tr-clickable" onclick="openClaim(${c.id})">
                 <td class="td-mono">#${c.id}</td>
                 <td>${c.patient_name || 'N/A'}</td>
                 <td>${fmtDate(c.visit_date)}</td>
-                <td class="td-mono">${(c.total_amount_myr||0).toFixed(2)}</td>
+                <td class="td-mono">${(c.total_amount_myr||0).toFixed(2)}${usageLine}</td>
                 <td><span class="badge badge-${c.status}">${c.status}</span></td>
                 <td>${c.status === 'DENIED' ? `<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();showAppealModal(${c.id})">${currentLang==='en'?'Appeal':'Rayuan'}</button>` : ''}</td>
             </tr>`;
@@ -776,12 +787,14 @@ async function submitClaim() {
             if (dec) {
                 const aiDecision = dec._ai_decision || dec.decision || finalStatus;
                 const confidence = dec.confidence ? `${(dec.confidence * 100).toFixed(0)}%` : 'N/A';
+                const aiUsage = safeObj(fullClaim.ai_usage);
                 decisionBadge = `
                     <div style="margin-top:12px;padding:12px;background:rgba(255,255,255,0.05);border-radius:8px;text-align:left;">
                         <div style="font-size:0.8rem;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;">AI Adjudication Result</div>
                         <span class="badge badge-${aiDecision}">${aiDecision}</span>
                         <span style="font-size:0.85rem;color:var(--text-secondary);margin-left:8px;">Confidence: ${confidence}</span>
                         ${dec.reasoning ? `<p style="margin-top:8px;font-size:0.82rem;color:var(--text-secondary);line-height:1.4;">${dec.reasoning.substring(0, 300)}${dec.reasoning.length > 300 ? '...' : ''}</p>` : ''}
+                        ${(aiUsage.total_tokens || 0) > 0 ? `<div style="margin-top:8px;font-size:0.82rem;color:var(--text-secondary);">AI Usage: <b style="color:#fff">${Number(aiUsage.total_tokens || 0).toLocaleString()} tokens</b> | Cost: <b style="color:#fff">RM ${(Number(aiUsage.total_cost_myr || 0)).toFixed(6)}</b></div>` : ''}
                     </div>`;
             }
         } catch (_) {}
@@ -820,6 +833,7 @@ async function openClaim(id) {
         currentClaimContext = claim;
         const decisionObj = safeObj(claim.decision);
         const fraudObj = safeObj(claim.fraud);
+        const aiUsage = safeObj(claim.ai_usage);
         const advisoryObj = safeObj(claim.advisory);
         const xrefObj = safeObj(claim.cross_ref_result);
         const validationFindings = safeArray(xrefObj.validation_findings);
@@ -860,6 +874,14 @@ async function openClaim(id) {
                         <div class="detail-row"><span class="detail-label">DRG Readiness</span><span class="detail-value">${mapDrgFromIcd(claim.icd10_code)}</span></div>
                         <div class="detail-row"><span class="detail-label">Total Amount</span><span class="detail-value td-mono">${fmtMYR(claim.total_amount_myr)}</span></div>
                     </div>
+                    ${(aiUsage.total_tokens || 0) > 0 ? `
+                    <div class="detail-card" style="margin-bottom:24px;">
+                        <h3 style="margin-bottom:16px;font-size:0.9rem;text-transform:uppercase;color:var(--text-secondary);">AI Usage</h3>
+                        <div class="detail-row"><span class="detail-label">Total Tokens</span><span class="detail-value td-mono">${Number(aiUsage.total_tokens || 0).toLocaleString()}</span></div>
+                        <div class="detail-row"><span class="detail-label">Prompt Tokens</span><span class="detail-value td-mono">${Number(aiUsage.prompt_tokens || 0).toLocaleString()}</span></div>
+                        <div class="detail-row"><span class="detail-label">Completion Tokens</span><span class="detail-value td-mono">${Number(aiUsage.completion_tokens || 0).toLocaleString()}</span></div>
+                        <div class="detail-row"><span class="detail-label">AI Cost</span><span class="detail-value td-mono">${fmtMYR(Number(aiUsage.total_cost_myr || 0))}</span></div>
+                    </div>` : ''}
 
                     ${claim.eob ? `
                     <div class="eob-card">
