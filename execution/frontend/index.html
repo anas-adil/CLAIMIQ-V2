@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="ClaimIQ v2 — AI-powered TPA Claims Intelligence for Malaysian GP Clinics. Powered by Z.AI GLM.">
-    <title>ClaimIQ — TPA Claims Intelligence</title>
+    <meta name="description" content="ClaimIQ v2 - AI-powered TPA Claims Intelligence for Malaysian GP Clinics. Powered by Z.AI GLM.">
+    <title>ClaimIQ - TPA Claims Intelligence</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <link rel="stylesheet" href="index.css?v=2.2">
+    <link rel="stylesheet" href="index.css?v=2.3">
 </head>
 <body>
     <div class="ambient-bg">
@@ -32,6 +32,7 @@
             <span class="brand-badge">Z.AI GLM v2</span>
         </div>
 
+        <button class="btn btn-ghost btn-sm" id="btnLogout" onclick="doLogout()" style="display:none; margin-right:10px;">Logout</button>
         <!-- Global Search -->
         <div class="global-search">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
@@ -91,32 +92,59 @@
     <!-- Main Content -->
     <main class="main-content" id="mainContent">
 
+        <!-- LOGIN VIEW -->
+        <section class="view active" id="viewLogin">
+            <div class="login-card" style="max-width: 400px; margin: 100px auto; padding: 30px; background: rgba(30, 41, 59, 0.7); border-radius: 12px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1);">
+                <h2 style="text-align:center; margin-bottom: 24px;">Login to ClaimIQ</h2>
+                <div style="margin-bottom: 16px;">
+                    <label style="display:block; margin-bottom: 8px; color: var(--text-secondary);">Email</label>
+                    <input type="email" id="loginEmail" class="claim-input" placeholder="admin@demo.my" value="admin@demo.my">
+                </div>
+                <div style="margin-bottom: 24px;">
+                    <label style="display:block; margin-bottom: 8px; color: var(--text-secondary);">Password</label>
+                    <input type="password" id="loginPassword" class="claim-input" placeholder="Demo@123" value="Demo@123">
+                </div>
+                <button class="btn btn-primary btn-lg" style="width: 100%;" onclick="doLogin()">Login</button>
+                <div id="loginError" style="color: var(--accent-red); margin-top: 16px; text-align: center; display: none;"></div>
+                
+                <div style="margin-top: 24px; font-size: 0.85rem; color: var(--text-secondary); text-align: center;">
+                    <p><strong>Demo Accounts (Pwd: Demo@123)</strong></p>
+                    <p>admin@demo.my (System Admin)</p>
+                    <p>clinic@demo.my (Clinic Portal)</p>
+                    <p>processor@demo.my (TPA Processor)</p>
+                    <p>fraud@demo.my (Fraud Analyst)</p>
+                </div>
+            </div>
+        </section>
+
+
         <!-- DASHBOARD -->
-        <section class="view active" id="viewDashboard">
+        <section class="view" id="viewDashboard">
             <div class="view-header">
                 <div>
                     <h1>Claims Intelligence Dashboard</h1>
                     <p class="view-subtitle">Real-time TPA operations powered by Z.AI GLM</p>
                 </div>
-                <button class="btn btn-ghost btn-sm" onclick="loadDashboard()">↻ Refresh</button>
+                <button class="btn btn-ghost btn-sm" onclick="loadDashboard()">Refresh</button>
             </div>
 
             <!-- KPI Row 1: Industry Standard -->
             <div class="kpi-grid" id="kpiGrid">
-                <div class="kpi-card kpi-blue"><div class="kpi-val" id="kpiCleanRate">—</div><div class="kpi-label">Clean Claim Rate</div><div class="kpi-target">Target: &gt;95%</div></div>
-                <div class="kpi-card kpi-red"><div class="kpi-val" id="kpiDenialRate">—</div><div class="kpi-label">Denial Rate</div><div class="kpi-target">Target: &lt;5%</div></div>
-                <div class="kpi-card kpi-green"><div class="kpi-val" id="kpiArDays">—</div><div class="kpi-label">Avg AR Days</div><div class="kpi-target">Target: &lt;40 days</div></div>
-                <div class="kpi-card kpi-purple"><div class="kpi-val" id="kpiAutoAdj">—</div><div class="kpi-label">Auto-Adjudicated</div><div class="kpi-target">Target: &gt;80%</div></div>
+                <div class="kpi-card kpi-blue"><div class="kpi-val" id="kpiCleanRate">-</div><div class="kpi-label">Clean Claim Rate</div><div class="kpi-target">Target: &gt;95%</div></div>
+                <div class="kpi-card kpi-red"><div class="kpi-val" id="kpiDenialRate">-</div><div class="kpi-label">Denial Rate</div><div class="kpi-target">Target: &lt;5%</div></div>
+                <div class="kpi-card kpi-green"><div class="kpi-val" id="kpiArDays">-</div><div class="kpi-label">Avg AR Days</div><div class="kpi-target">Target: &lt;40 days</div></div>
+                <div class="kpi-card kpi-purple"><div class="kpi-val" id="kpiAutoAdj">-</div><div class="kpi-label">Auto-Adjudicated</div><div class="kpi-target">Target: &gt;80%</div></div>
             </div>
 
             <!-- Stat Cards Row 2 -->
             <div class="stats-grid" id="statsGrid">
-                <div class="stat-card stat-primary"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/></svg></div><div class="stat-value" id="statTotal">—</div><div class="stat-label">Total Claims</div></div>
-                <div class="stat-card stat-success"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg></div><div class="stat-value" id="statApproved">—</div><div class="stat-label">Approved</div></div>
-                <div class="stat-card stat-danger"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-value" id="statDenied">—</div><div class="stat-label">Denied</div></div>
-                <div class="stat-card stat-warning"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v2m0 4h.01M5.07 19H18.93a2 2 0 001.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16a2 2 0 001.73 3z"/></svg></div><div class="stat-value" id="statFraud">—</div><div class="stat-label">High Risk Flags</div></div>
-                <div class="stat-card stat-info"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></div><div class="stat-value" id="statAvg">—</div><div class="stat-label">Avg Claim (MYR)</div></div>
-                <div class="stat-card stat-accent"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg></div><div class="stat-value" id="statApprovedAmt">—</div><div class="stat-label">Total Approved (MYR)</div></div>
+                <div class="stat-card stat-primary"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/></svg></div><div class="stat-value" id="statTotal">-</div><div class="stat-label">Total Claims</div></div>
+                <div class="stat-card stat-success"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/></svg></div><div class="stat-value" id="statApproved">-</div><div class="stat-label">Approved</div></div>
+                <div class="stat-card stat-danger"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-value" id="statDenied">-</div><div class="stat-label">Denied</div></div>
+                <div class="stat-card stat-warning"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v2m0 4h.01M5.07 19H18.93a2 2 0 001.73-3L13.73 4a2 2 0 00-3.46 0L3.34 16a2 2 0 001.73 3z"/></svg></div><div class="stat-value" id="statFraud">-</div><div class="stat-label">High Risk Flags</div></div>
+                <div class="stat-card stat-info"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg></div><div class="stat-value" id="statAvg">-</div><div class="stat-label">Avg Claim (MYR)</div></div>
+                <div class="stat-card stat-accent"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg></div><div class="stat-value" id="statApprovedAmt">-</div><div class="stat-label">Total Approved (MYR)</div></div>
+                <div class="stat-card stat-info"><div class="stat-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 16V8"/><path d="M12 16V10"/><path d="M16 16v-4"/></svg></div><div class="stat-value" id="statTokens">-</div><div class="stat-label">GLM Tokens</div></div>
             </div>
 
             <!-- Charts Row -->
@@ -161,6 +189,8 @@
                         <option value="DENIED">Denied</option>
                         <option value="REFERRED">Referred</option>
                         <option value="APPEALING">Appealing</option>
+                        <option value="PENDING_APPROVAL">Pending Approval</option>
+                        <option value="PENDING_DENIAL">Pending Denial</option>
                     </select>
                     <button class="btn btn-primary" onclick="loadClaims()">Refresh</button>
                 </div>
@@ -179,7 +209,7 @@
                     <div id="denialCodesList" class="denial-codes-list"><p class="empty-state">Loading...</p></div>
                 </div>
                 <div class="section-card">
-                    <h2>Denied Claims — Appeal Ready</h2>
+                    <h2>Denied Claims - Appeal Ready</h2>
                     <div id="deniedClaimsList" class="denied-list"><p class="empty-state">Loading...</p></div>
                 </div>
             </div>
@@ -188,7 +218,7 @@
         <!-- FRAUD VIEW -->
         <section class="view" id="viewFraud">
             <div class="view-header">
-                <div><h1>Fraud Detection</h1><p class="view-subtitle">AI-powered anomaly detection — Z.AI GLM identifies patterns humans miss</p></div>
+                <div><h1>Fraud Detection</h1><p class="view-subtitle">AI-powered anomaly detection - Z.AI GLM identifies patterns humans miss</p></div>
             </div>
             <div class="fraud-grid">
                 <div class="section-card">
@@ -211,6 +241,10 @@
                 <div class="section-header"><h2>Clinic Performance Benchmarks</h2></div>
                 <div class="table-wrap" id="clinicTable"><p class="empty-state">Loading...</p></div>
             </div>
+            <div class="section-card" style="margin-top:16px;">
+                <div class="section-header"><h2>MC Behavioral Patterns</h2></div>
+                <canvas id="mcPatternChart" height="120"></canvas>
+            </div>
         </section>
 
         <!-- GP PORTAL -->
@@ -218,7 +252,7 @@
             <div class="view-header">
                 <div>
                     <h1>GP Clinic Portal</h1>
-                    <p class="view-subtitle">Selamat datang — Your claims overview and advisory hub</p>
+                    <p class="view-subtitle">Selamat datang - Your claims overview and advisory hub</p>
                 </div>
                 <div class="lang-toggle">
                     <button class="btn btn-sm btn-ghost active" id="langEN" onclick="setLang('en')">EN</button>
@@ -309,7 +343,7 @@ Example: Patient presented with severe throat pain. Temp 38.5C. Rapid Strep test
                         </div>
                     </div>
                     <div class="chat-messages" id="chatMessages">
-                        <div class="chat-msg chat-msg-system">Hi! Ask me anything about this claim — why it was denied, what to do next, or how to appeal.</div>
+                        <div class="chat-msg chat-msg-system">Hi! Ask me anything about this claim - why it was denied, what to do next, or how to appeal.</div>
                     </div>
                     <div class="chat-suggested" id="chatSuggested"></div>
                     <div class="chat-input-row">
@@ -338,6 +372,8 @@ Example: Patient presented with severe throat pain. Temp 38.5C. Rapid Strep test
         </div>
     </main>
 
-    <script src="app.js?v=2.2"></script>
+    <script src="app.js?v=2.3"></script>
 </body>
 </html>
+
+

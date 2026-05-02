@@ -4,6 +4,8 @@ cross_reference_engine.py — Deterministic Evidence Cross-Reference
 
 import logging
 import re
+import glm_client
+import validation_engine
 
 logger = logging.getLogger("claimiq.xref")
 
@@ -171,8 +173,6 @@ def check_invoice_vs_claim(parsed_invoice: dict, claimed_amount: float) -> dict:
             }
     return None
 
-import glm_client
-
 def cross_reference_all(parsed_evidence_list: list, claim_data: dict, raw_text: str = "") -> dict:
     if not parsed_evidence_list:
         return {
@@ -184,6 +184,24 @@ def cross_reference_all(parsed_evidence_list: list, claim_data: dict, raw_text: 
         }
         
     checks = []
+
+    # 0. Deterministic cross-document consistency validation (no LLM dependency).
+    deterministic = validation_engine.evaluate_claim_consistency(claim_data, parsed_evidence_list)
+    for f in deterministic.get("findings", []):
+        sev = f.get("severity", "INFO")
+        if sev not in ("WARN", "CRITICAL"):
+            continue
+        checks.append({
+            "check": "deterministic_consistency",
+            "result": "CRITICAL_CONTRADICTION" if sev == "CRITICAL" else "WARN",
+            "field": f.get("field", "unknown"),
+            "doctor_says": f.get("claim_value"),
+            "lab_shows": f.get("evidence_value"),
+            "note": f.get("note"),
+            "evidence_id": f.get("evidence_id"),
+            "source_doc": f.get("source_doc"),
+            "validation_type": f.get("type"),
+        })
     
     # 1. Identity Check (deterministic is fine)
     for parsed_evidence in parsed_evidence_list:
@@ -257,5 +275,11 @@ def cross_reference_all(parsed_evidence_list: list, claim_data: dict, raw_text: 
         "verdict": verdict,
         "checks": checks,
         "contradiction_count": contradiction_count,
-        "critical_count": critical_count
+        "critical_count": critical_count,
+        "validation_findings": deterministic.get("findings", []),
+        "deterministic_summary": {
+            "verdict": deterministic.get("verdict", "PASS"),
+            "critical_count": deterministic.get("critical_count", 0),
+            "warning_count": deterministic.get("warning_count", 0),
+        },
     }

@@ -103,9 +103,13 @@ def get_policy_context(claim_data: dict, top_k: int = 5) -> str:
     Searches using diagnosis + procedures as query.
     """
     diagnosis = claim_data.get("diagnosis", "")
-    procedures = ", ".join(claim_data.get("procedures", []))
+    procedures_list = claim_data.get("procedures") or []
+    procedures = ", ".join(procedures_list) if isinstance(procedures_list, list) else str(procedures_list)
+    
+    meds_list = claim_data.get("medications") or []
     medications = ", ".join(
-        m.get("name", "") for m in claim_data.get("medications", [])
+        m.get("name", "") if isinstance(m, dict) else str(m)
+        for m in meds_list
     )
     query = f"{diagnosis} {procedures} {medications}".strip()
     if not query:

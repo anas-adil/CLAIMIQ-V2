@@ -1,431 +1,480 @@
-"""
-api_server.py (v2) — FastAPI server for ClaimIQ
-
-New endpoints (v2):
-- POST /api/claims/scrub         — Pre-adjudication validation
-- POST /api/claims/eligibility   — Member eligibility check
-- POST /api/claims/appeal/{id}   — Submit appeal
-- GET  /api/analytics/kpis       — KPI metrics
-- GET  /api/analytics/clinics    — Clinic performance
-- GET  /api/analytics/denials    — Denial breakdown
-- GET  /api/analytics/weekly-report — GLM weekly narrative report
-- POST /api/claims/{id}/chat     — Ask GLM about a claim
-"""
-
-import sys, os, json, logging
+import sys, os, json, logging, hashlib, threading
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import Optional
-from datetime import date, datetime
-from dotenv import load_dotenv
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, constr
+from typing import Optional, List
+from datetime import datetime, timezone
+import bcrypt
+import jwt
 
 import database as db
 import claims_processor
 import glm_client
-import rag_engine
-import claim_scrubber
+import mc_analytics
 import eligibility_engine
+from auth_middleware import require_role, get_current_user, _get_jwt_secret, security
+from fastapi.security import HTTPAuthorizationCredentials
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("claimiq.api")
 
-app = FastAPI(title="ClaimIQ API v2", version="2.0.0",
-              description="Z.AI GLM-Powered TPA Claims Intelligence")
+app = FastAPI(title="ClaimIQ MVP API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-if "*" in ALLOWED_ORIGINS and (os.getenv("APP_ENV") or "dev").lower() in ("prod", "production"):
-    raise RuntimeError("Wildcard CORS is forbidden in production. Set explicit ALLOWED_ORIGINS.")
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True,
-                   allow_methods=["GET", "POST", "PUT"], allow_headers=["Authorization", "Content-Type"])
+# --- Models ---
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
-
-import requests
-
-# --- Request Models ---
-from pydantic import BaseModel, Field, constr
-import re
+class LineItem(BaseModel):
+    description: str
+    quantity: int
+    unit_price: float
+    total: float
 
 class ClaimSubmission(BaseModel):
-    raw_text: constr(min_length=10, max_length=5000)
-    bill_attached: Optional[bool] = False
-    evidence_attached: Optional[bool] = False
+    raw_text: str
+    bill_attached: bool
+    evidence_attached: bool
     evidence_base64: Optional[str] = None
     invoice_base64: Optional[str] = None
     patient_name: constr(min_length=2, max_length=100)
     patient_ic: constr(pattern=r"^\d{6}-\d{2}-\d{4}$")
-    clinic_name: constr(min_length=2, max_length=150)
-    total_amount_myr: float = Field(..., ge=0.0, le=100000.0)
+    clinic_name: str
     visit_date: constr(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    total_amount_myr: float
 
-class DemoGenerate(BaseModel):
-    count: int = 50
+class RAIRequest(BaseModel):
+    request_note: str
+
+class RAIResponse(BaseModel):
+    response_note: str
 
 class AppealSubmission(BaseModel):
     appeal_reason: str
-    supporting_evidence: Optional[str] = ""
 
-class ChatQuestion(BaseModel):
+class ReviewAction(BaseModel):
+    action: constr(pattern=r"^(APPROVED|DENIED|APPROVE|DENY)$")
+    reason: Optional[str] = ""
+
+class ChatRequest(BaseModel):
     question: str
 
-
-class EligibilityRequest(BaseModel):
+class CoverageEligibilityRequest(BaseModel):
     ic_number: constr(pattern=r"^\d{6}-\d{2}-\d{4}$")
     visit_date: constr(pattern=r"^\d{4}-\d{2}-\d{2}$")
-    total_amount_myr: float = Field(..., ge=0.0, le=100000.0)
+    total_amount_myr: float = Field(ge=0)
 
+# --- Routes ---
 
-def _require_operator_role(authorization: Optional[str] = Header(default=None)):
-    expected = os.getenv("API_BEARER_TOKEN", "").strip()
-    if not expected:
-        return
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
-    token = authorization.split(" ", 1)[1].strip()
-    if token != expected:
-        raise HTTPException(status_code=403, detail="AUTH_FORBIDDEN")
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_, exc: RequestValidationError):
-    return JSONResponse(
-        status_code=422,
-        content={"error": "VALIDATION_ERROR", "details": exc.errors()},
+@app.post("/api/auth/login")
+async def login(body: LoginRequest):
+    conn = db.get_db()
+    user = conn.execute("SELECT * FROM users WHERE email=?", (body.email,)).fetchone()
+    conn.close()
+    if not user:
+        raise HTTPException(401, "Invalid email or password")
+    
+    if not bcrypt.checkpw(body.password.encode(), user["password_hash"].encode()):
+        raise HTTPException(401, "Invalid email or password")
+        
+    payload = {
+        "user_id": user["id"],
+        "role": user["role"],
+        "tenant_type": user["tenant_type"],
+        "tenant_id": user["clinic_id"] or user["tpa_id"] or user["id"],
+        "clinic_id": user["clinic_id"],
+        "tpa_id": user["tpa_id"],
+        "iat": int(datetime.now(timezone.utc).timestamp()),
+        "exp": int(datetime.now(timezone.utc).timestamp()) + 8*3600
+    }
+    secret = _get_jwt_secret()
+    token = jwt.encode(payload, secret, algorithm="HS256")
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    conn = db.get_db()
+    conn.execute(
+        "INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)",
+        (os.urandom(16).hex(), user["id"], token_hash, datetime.fromtimestamp(payload["exp"]).isoformat())
     )
+    db.log_audit(conn, action="LOGIN", user_id=user["id"])
+    conn.commit()
+    conn.close()
+    
+    redirect_map = {
+        "CLINIC_USER": "#/portal/clinic",
+        "TPA_PROCESSOR": "#/portal/tpa",
+        "TPA_FRAUD_ANALYST": "#/portal/tpa",
+        "SYSTEM_ADMIN": "#/portal/admin"
+    }
+    return {
+        "token": token,
+        "access_token": token,
+        "token_type": "bearer",
+        "redirect": redirect_map.get(user["role"], "#/"),
+        "user": {"id": user["id"], "email": user["email"], "role": user["role"], "tenant_type": user["tenant_type"]}
+    }
 
-
-# --- Helpers ---
-def _parse_json_fields(obj: dict, fields: list) -> dict:
-    for f in fields:
-        if obj.get(f) and isinstance(obj[f], str):
-            try:
-                obj[f] = json.loads(obj[f])
-            except (json.JSONDecodeError, TypeError):
-                pass
-    return obj
-
-# _call_huggingface_vision removed (Phase 5) - Replaced by MedGemma client
-
-# ── Claims ─────────────────────────────────────────────────
+@app.post("/api/auth/logout")
+async def logout(
+    user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    token_hash = hashlib.sha256(credentials.credentials.encode()).hexdigest()
+    conn = db.get_db()
+    conn.execute("UPDATE sessions SET revoked=1 WHERE token_hash=?", (token_hash,))
+    db.log_audit(conn, action="LOGOUT", user_id=user["user_id"])
+    conn.commit()
+    conn.close()
+    return {"message": "Logged out"}
 
 @app.post("/api/claims/submit")
-async def submit_claim(body: ClaimSubmission):
-    # Store everything, parse nothing yet.
-    # Evidence parsing will be handled during processing via MedGemma.
-    initial_data = {}
-    if body.patient_name:
-        initial_data["patient_name"] = body.patient_name
-    if body.patient_ic:
-        initial_data["patient_ic"] = body.patient_ic
-    if body.clinic_name:
-        initial_data["clinic_name"] = body.clinic_name
-    initial_data["visit_date"] = body.visit_date
-    initial_data["total_amount_myr"] = body.total_amount_myr
-    if body.evidence_base64:
-        initial_data["_evidence_base64"] = body.evidence_base64
-    if body.invoice_base64:
-        initial_data["_invoice_base64"] = body.invoice_base64
-    initial_data["_evidence_attached"] = body.evidence_attached
+async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(["CLINIC_USER"]))):
+    visit = datetime.strptime(body.visit_date, "%Y-%m-%d").date()
+    if visit > datetime.now(timezone.utc).date():
+        raise HTTPException(422, "Visit date cannot be in the future")
 
-    # We preserve the raw text as the primary medical packet
-    medical_packet = (
-        f"--- PATIENT INFO ---\n"
-        f"Name: {body.patient_name or 'UNKNOWN'}\n"
-        f"IC: {body.patient_ic or 'UNKNOWN'}\n"
-        f"Clinic: {body.clinic_name or 'UNKNOWN'}\n"
-        f"Date: {body.visit_date}\n\n"
-        f"--- CLINICAL NOTES ---\n{body.raw_text}\n\n"
-        f"--- ATTACHED EVIDENCE ---\n"
-        f"Itemized Bill Attached: {'YES' if body.bill_attached else 'NO'}\n"
-        f"Lab Results/X-Rays Attached: {'YES' if body.evidence_attached else 'NO'}\n"
-        f"Vision Analysis Source: MEDGEMMA_PENDING\n"
+    # Total amount validation logic is deferred to the scrubber because line items are not parsed yet
+        
+    conn = db.get_db()
+    dup = conn.execute(
+        "SELECT id FROM claims WHERE clinic_id=? AND patient_ic=? AND visit_date=? AND ABS(total_amount_myr-?) < 0.01 "
+        "AND status NOT IN ('ERROR') ORDER BY created_at DESC LIMIT 1",
+        (user["clinic_id"], body.patient_ic, body.visit_date, body.total_amount_myr),
+    ).fetchone()
+    if dup:
+        conn.close()
+        raise HTTPException(409, f"Potential duplicate claim detected (claim_id={dup['id']})")
+
+    cur = conn.execute(
+        "INSERT INTO claims (status, lifecycle_stage, patient_ic, patient_name, visit_date, "
+        "clinic_id, clinic_name, raw_text, extracted_data, total_amount_myr) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("SUBMITTED", "SUBMITTED", body.patient_ic, body.patient_name, body.visit_date,
+         user["clinic_id"], body.clinic_name, body.raw_text, json.dumps({
+             "patient_name": body.patient_name,
+             "patient_ic": body.patient_ic,
+             "clinic_name": body.clinic_name,
+             "visit_date": body.visit_date,
+             "total_amount_myr": body.total_amount_myr,
+             "_evidence_base64": body.evidence_base64,
+             "_invoice_base64": body.invoice_base64,
+             "_bill_attached": bool(body.bill_attached),
+             "_evidence_attached": bool(body.evidence_attached),
+         }), body.total_amount_myr)
     )
-
-    claim_id = db.insert_claim(medical_packet, extracted=initial_data if initial_data else None)
-    return {"claim_id": claim_id, "status": "INTAKE"}
-
-
-@app.post("/api/claims/scrub")
-async def scrub_claim_endpoint(body: ClaimSubmission):
-    """Run pre-adjudication scrub checks without full processing."""
-    claim_data = {"raw_text": body.raw_text}
-    result = claim_scrubber.scrub_claim(claim_data)
-    return result
-
-
-@app.post("/api/claims/eligibility")
-async def check_eligibility(body: EligibilityRequest):
-    """Check member eligibility by IC number."""
-    result = eligibility_engine.check_eligibility(
-        body.ic_number,
-        body.visit_date,
-        body.total_amount_myr,
-    )
-    return result
-
-
-@app.post("/api/claims/process/{claim_id}")
-async def process_claim(claim_id: int, _: None = Depends(_require_operator_role)):
-    claim = db.get_claim(claim_id)
-    if not claim:
-        raise HTTPException(404, f"Claim {claim_id} not found")
-    result = claims_processor.process_claim(claim_id=claim_id)
-    return result
-
-
-@app.get("/api/claims/{claim_id}")
-async def get_claim(claim_id: int):
-    result = db.get_full_claim(claim_id)
-    if not result:
-        raise HTTPException(404, f"Claim {claim_id} not found")
-    _parse_json_fields(result, ["extracted_data", "coded_data", "scrub_result", "eligibility_result"])
-    if result.get("decision"):
-        _parse_json_fields(result["decision"], ["full_result", "policy_references", "conditions"])
-    if result.get("fraud"):
-        _parse_json_fields(result["fraud"], ["full_result", "flags"])
-    if result.get("advisory"):
-        _parse_json_fields(result["advisory"], ["full_result", "action_items"])
-    return result
-
+    claim_id = cur.lastrowid
+    db.log_audit(conn, claim_id=claim_id, action="CLAIM_SUBMITTED", user_id=user["user_id"], to_status="SUBMITTED")
+    conn.commit()
+    conn.close()
+    
+    # Run the heavy processing pipeline in a background thread so the API
+    # returns immediately. The frontend polls /api/claims/{id} to track progress.
+    def _bg_process():
+        try:
+            claims_processor.process_claim(claim_id=claim_id)
+        except Exception as e:
+            logger.error(f"Background processing failed for claim {claim_id}: {e}")
+    
+    t = threading.Thread(target=_bg_process, daemon=True)
+    t.start()
+        
+    return {"claim_id": claim_id, "status": "SUBMITTED"}
 
 @app.get("/api/claims/")
-async def list_claims(limit: int = 100, status: Optional[str] = None, clinic: Optional[str] = None):
-    claims = db.list_claims(limit=limit, status=status, clinic=clinic)
-    for c in claims:
-        _parse_json_fields(c, ["extracted_data"])
-    return {"claims": claims, "total": len(claims)}
-
-
-@app.post("/api/claims/{claim_id}/appeal")
-async def submit_appeal(claim_id: int, body: AppealSubmission, _: None = Depends(_require_operator_role)):
-    """Submit an appeal and get GLM-drafted rebuttal."""
-    claim = db.get_full_claim(claim_id)
-    if not claim:
-        raise HTTPException(404, f"Claim {claim_id} not found")
-    if claim.get("status") not in ("DENIED", "REFERRED"):
-        raise HTTPException(400, "Can only appeal DENIED or REFERRED claims")
-
-    denial = claim.get("decision") or {}
-    claim_data = claim.get("extracted_data") or {}
-    if isinstance(claim_data, str):
-        try:
-            claim_data = json.loads(claim_data)
-        except Exception:
-            claim_data = {}
-
-    try:
-        rebuttal = glm_client.draft_appeal_rebuttal(denial, claim_data, body.appeal_reason)
-        appeal_id = db.insert_appeal(
-            claim_id,
-            reason=body.appeal_reason,
-            evidence=body.supporting_evidence or "",
-            rebuttal=rebuttal.get("rebuttal_body", ""),
-            rebuttal_bm=rebuttal.get("rebuttal_body_bm", ""),
-        )
-        return {"appeal_id": appeal_id, "rebuttal": rebuttal}
-    except Exception as e:
-        raise HTTPException(500, f"Appeal processing failed: {e}")
-
-
-@app.post("/api/claims/{claim_id}/chat")
-async def claim_chat(claim_id: int, body: ChatQuestion, _: None = Depends(_require_operator_role)):
-    """Ask GLM a question about a specific claim."""
-    claim = db.get_full_claim(claim_id)
-    if not claim:
-        raise HTTPException(404, f"Claim {claim_id} not found")
-
-    # Build a clean context dict for GLM
-    ctx = {
-        "claim_id": claim_id,
-        "patient": claim.get("patient_name"),
-        "clinic": claim.get("clinic_name"),
-        "diagnosis": claim.get("diagnosis"),
-        "amount_myr": claim.get("total_amount_myr"),
-        "status": claim.get("status"),
-        "visit_date": claim.get("visit_date"),
-        "extracted_data": claim.get("extracted_data"),
-        "raw_text_evidence": claim.get("raw_text_evidence"),
-    }
-    if claim.get("decision"):
-        d = claim["decision"]
-        ctx["decision"] = {
-            "result": d.get("decision"),
-            "confidence": d.get("confidence"),
-            "reasoning": d.get("reasoning"),
-            "approved_myr": d.get("amount_approved_myr"),
-            "denied_myr": d.get("amount_denied_myr"),
-            "denial_code": d.get("denial_reason_code"),
-        }
-    if claim.get("fraud"):
-        ctx["fraud"] = {
-            "risk_score": claim["fraud"].get("risk_score"),
-            "risk_level": claim["fraud"].get("risk_level"),
-            "recommendation": claim["fraud"].get("recommendation"),
-        }
-
-    if claim.get("parsed_evidence"):
-        try:
-            ctx["parsed_evidence"] = json.loads(claim["parsed_evidence"]) if isinstance(claim["parsed_evidence"], str) else claim["parsed_evidence"]
-        except Exception:
-            ctx["parsed_evidence"] = claim["parsed_evidence"]
-
-    if claim.get("cross_ref_result"):
-        try:
-            ctx["cross_ref_result"] = json.loads(claim["cross_ref_result"]) if isinstance(claim["cross_ref_result"], str) else claim["cross_ref_result"]
-        except Exception:
-            ctx["cross_ref_result"] = claim["cross_ref_result"]
-            
-    if claim.get("raw_text"):
-        ctx["raw_evidence_packet"] = claim["raw_text"]
-
-    try:
-        answer = glm_client.answer_claim_question(body.question, ctx)
-        return answer
-    except Exception as e:
-        raise HTTPException(500, f"Chat failed: {e}")
-
-
-# ── Analytics ───────────────────────────────────────────────
-
-@app.get("/api/analytics/summary")
-async def analytics_summary():
-    return db.get_analytics_summary()
-
-
-@app.get("/api/analytics/kpis")
-async def analytics_kpis():
-    summary = db.get_analytics_summary()
-    return summary.get("kpis", {})
-
-
-@app.get("/api/analytics/clinics")
-async def analytics_clinics():
-    return {"clinics": db.get_clinic_analytics()}
-
-
-@app.get("/api/analytics/denials")
-async def analytics_denials():
-    return {"breakdown": db.get_denial_breakdown()}
-
-
-@app.get("/api/analytics/fraud-heatmap")
-async def fraud_heatmap():
+async def get_claims_queue(
+    limit: int = 100,
+    status: Optional[str] = None,
+    clinic: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
     conn = db.get_db()
+    tf_clause, tf_params = db._tenant_filter(user)
+    conditions = []
+    params: list = []
+    if tf_clause:
+        conditions.append(tf_clause)
+        params.extend(tf_params)
+    if status:
+        conditions.append("status=?")
+        params.append(status)
+    if clinic:
+        conditions.append("clinic_name LIKE ?")
+        params.append(f"%{clinic}%")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = conn.execute(
-        "SELECT f.risk_level, f.risk_score, c.diagnosis, c.total_amount_myr, c.clinic_name, c.id as claim_id "
-        "FROM fraud_scores f JOIN claims c ON f.claim_id = c.id"
+        f"SELECT id, patient_name, patient_ic, visit_date, created_at, clinic_name, clinic_id, "
+        f"diagnosis, icd10_code, total_amount_myr, status "
+        f"FROM claims {where} ORDER BY created_at DESC LIMIT ?",
+        params + [max(1, min(limit, 500))],
     ).fetchall()
     conn.close()
-    return {"heatmap_data": [dict(r) for r in rows], "total": len(rows)}
+    claims = []
+    for r in rows:
+        d = dict(r)
+        d["claim_id"] = d["id"]
+        d["total_amount"] = d.get("total_amount_myr")
+        claims.append(d)
+    return {"claims": claims}
 
-
-@app.get("/api/analytics/gp-performance")
-async def gp_performance():
-    return {"clinics": db.get_clinic_analytics()}
-
-
-@app.get("/api/analytics/weekly-report")
-async def weekly_report():
-    """GLM generates a narrative weekly intelligence report."""
+@app.get("/api/claims/{claim_id}")
+async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)):
+    conn = db.get_db()
+    tf_clause, tf_params = db._tenant_filter(user)
+    claim = conn.execute(f"SELECT * FROM claims WHERE id=? AND ({tf_clause or '1=1'})", [claim_id] + tf_params).fetchone()
+    if not claim:
+        conn.close()
+        raise HTTPException(404, "Claim not found")
+        
+    res = dict(claim)
+    res["diagnosis_codes"] = json.loads(res.get("diagnosis_codes") or "[]")
+    res["line_items"] = json.loads(res.get("line_items") or "[]")
     try:
-        analytics = db.get_analytics_summary()
-        clinic_data = db.get_clinic_analytics()
-        analytics["top_clinics"] = clinic_data[:5]
-        report = glm_client.generate_weekly_report(analytics)
-        return report
+        res["cross_ref_result"] = json.loads(res.get("cross_ref_result") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        res["cross_ref_result"] = {}
+    
+    actions = conn.execute("SELECT * FROM action_notes WHERE claim_id=? ORDER BY created_at ASC", (claim_id,)).fetchall()
+    res["action_history"] = [dict(a) for a in actions]
+
+    decision = conn.execute("SELECT * FROM decisions WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    res["decision"] = dict(decision) if decision else None
+
+    fraud = conn.execute("SELECT * FROM fraud_scores WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    res["fraud"] = dict(fraud) if fraud else None
+
+    # advisory — needed by the GP Advisory card in the claim modal
+    advisory = conn.execute("SELECT * FROM advisories WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    res["advisory"] = dict(advisory) if advisory else None
+
+    # eob — needed by the EOB card in the claim modal
+    eob = conn.execute("SELECT * FROM eobs WHERE claim_id=? ORDER BY generated_at DESC LIMIT 1", (claim_id,)).fetchone()
+    res["eob"] = dict(eob) if eob else None
+
+    # audit_trail — needed by the Audit Timeline section in the claim modal
+    audit = conn.execute("SELECT * FROM audit_log WHERE claim_id=? ORDER BY created_at ASC", (claim_id,)).fetchall()
+    res["audit_trail"] = [dict(a) for a in audit]
+
+    conn.close()
+    return res
+
+@app.post("/api/claims/{claim_id}/rai")
+async def raise_rai(claim_id: int, body: RAIRequest, user: dict = Depends(require_role(["TPA_PROCESSOR"]))):
+    conn = db.get_db()
+    conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
+                 (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_REQUEST", body.request_note))
+    conn.execute("UPDATE claims SET status='PENDING_RAI' WHERE id=?", (claim_id,))
+    db.log_audit(conn, claim_id=claim_id, action="RAI_REQUESTED", user_id=user["user_id"], to_status="PENDING_RAI")
+    conn.commit()
+    conn.close()
+    return {"status": "PENDING_RAI"}
+
+@app.post("/api/claims/{claim_id}/rai-response")
+async def respond_rai(claim_id: int, body: RAIResponse, user: dict = Depends(require_role(["CLINIC_USER"]))):
+    conn = db.get_db()
+    conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
+                 (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_RESPONSE", body.response_note))
+    conn.execute("UPDATE claims SET status='UNDER_REVIEW' WHERE id=?", (claim_id,))
+    db.log_audit(conn, claim_id=claim_id, action="RAI_RESPONDED", user_id=user["user_id"], to_status="UNDER_REVIEW")
+    conn.commit()
+    conn.close()
+    return {"status": "UNDER_REVIEW"}
+
+@app.post("/api/claims/{claim_id}/appeal")
+async def appeal_claim(claim_id: int, body: AppealSubmission, user: dict = Depends(require_role(["CLINIC_USER"]))):
+    conn = db.get_db()
+    tf_clause, tf_params = db._tenant_filter(user)
+    claim = conn.execute(
+        f"SELECT id, status FROM claims WHERE id=? AND ({tf_clause or '1=1'})",
+        [claim_id] + tf_params,
+    ).fetchone()
+    if not claim:
+        conn.close()
+        raise HTTPException(404, "Claim not found")
+    allowed = {"DENIED", "REFERRED", "PENDING_DENIAL", "PENDING_APPROVAL"}
+    if claim["status"] not in allowed:
+        conn.close()
+        raise HTTPException(409, "Claim is not in an appealable status")
+
+    conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
+                 (os.urandom(16).hex(), claim_id, user["user_id"], "APPEAL", body.appeal_reason))
+    conn.execute("UPDATE claims SET status='UNDER_REVIEW' WHERE id=?", (claim_id,))
+    db.log_audit(conn, claim_id=claim_id, action="CLAIM_APPEALED", user_id=user["user_id"], to_status="UNDER_REVIEW")
+    conn.commit()
+    conn.close()
+    return {"status": "UNDER_REVIEW"}
+
+@app.post("/api/claims/{claim_id}/review")
+async def review_claim(claim_id: int, body: ReviewAction, user: dict = Depends(require_role(["TPA_PROCESSOR", "SYSTEM_ADMIN"]))):
+    final_action = "APPROVED" if body.action == "APPROVE" else ("DENIED" if body.action == "DENY" else body.action)
+    # Verify the claim exists and is in a reviewable state
+    claim = db.get_full_claim(claim_id)
+    if not claim:
+        raise HTTPException(404, "Claim not found")
+    conn = db.get_db()
+    db.update_claim(claim_id, status=final_action)
+    db.log_audit(conn, claim_id=claim_id, action=f"CLAIM_MANUAL_{final_action}", user_id=user["user_id"], to_status=final_action, details=body.reason)
+    conn.commit()
+    conn.close()
+    return {"status": final_action}
+
+@app.post("/api/claims/{claim_id}/chat")
+async def chat_with_claim(claim_id: int, body: ChatRequest, user: dict = Depends(get_current_user)):
+    conn = db.get_db()
+    tf_clause, tf_params = db._tenant_filter(user)
+    claim = conn.execute(f"SELECT * FROM claims WHERE id=? AND ({tf_clause or '1=1'})", [claim_id] + tf_params).fetchone()
+    if not claim:
+        conn.close()
+        raise HTTPException(404, "Claim not found")
+    
+    decision = conn.execute("SELECT * FROM decisions WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    fraud = conn.execute("SELECT * FROM fraud_scores WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
+    conn.close()
+    
+    claim_dict = dict(claim)
+    context = {
+        "claim_id": claim_id,
+        "status": claim_dict.get("status"),
+        "diagnosis": claim_dict.get("diagnosis"),
+        "total_amount_myr": claim_dict.get("total_amount_myr"),
+        "decision": dict(decision) if decision else None,
+        "fraud": dict(fraud) if fraud else None,
+    }
+    
+    try:
+        answer = glm_client.answer_claim_question(body.question, context)
+        return answer
     except Exception as e:
-        raise HTTPException(500, f"Weekly report failed: {e}")
+        logger.error(f"Chat error: {e}")
+        return {"answer": f"I could not process your question at this time. Error: {str(e)}", "follow_up_questions": []}
 
+@app.get("/api/tpa/claims/queue")
+async def tpa_queue(user: dict = Depends(require_role(["TPA_PROCESSOR"]))):
+    conn = db.get_db()
+    claims = conn.execute("SELECT id as claim_id, patient_name, visit_date, total_amount_myr as total_amount, status FROM claims WHERE status IN ('UNDER_REVIEW', 'SUBMITTED', 'PENDING_RAI')").fetchall()
+    conn.close()
+    return {"claims": [dict(c) for c in claims]}
 
-# ── Demo ────────────────────────────────────────────────────
+@app.get("/api/tpa/fraud/flagged")
+async def fraud_queue(user: dict = Depends(require_role(["TPA_FRAUD_ANALYST"]))):
+    conn = db.get_db()
+    claims = conn.execute("SELECT id as claim_id, patient_name, visit_date, total_amount_myr as total_amount, status FROM claims WHERE status = 'FRAUD_FLAG'").fetchall()
+    conn.close()
+    return {"claims": [dict(c) for c in claims]}
 
-@app.post("/api/demo/generate")
-async def demo_generate(body: DemoGenerate):
-    if (os.getenv("APP_ENV") or "dev").lower() in ("prod", "production"):
-        raise HTTPException(403, "DEMO_ENDPOINT_DISABLED_IN_PRODUCTION")
-    from generate_synthetic_data import generate
-    claims = generate(body.count)
-    for claim in claims:
-        raw = f"Patient: {claim['patient_name']}\nIC: {claim['patient_ic']}\nDate: {claim['visit_date']}\nClinic: {claim['clinic_name']}\nDiagnosis: {claim['diagnosis']}\nTotal: RM {claim['total_amount_myr']}"
-        db.insert_claim(raw, extracted=claim)
-    return {"generated": len(claims)}
+@app.post("/api/tpa/fraud/{claim_id}/confirm")
+async def fraud_confirm(claim_id: int, user: dict = Depends(require_role(["TPA_FRAUD_ANALYST"]))):
+    conn = db.get_db()
+    conn.execute("UPDATE claims SET status='DENIED' WHERE id=?", (claim_id,))
+    db.log_audit(conn, claim_id=claim_id, action="FRAUD_CONFIRMED", user_id=user["user_id"], to_status="DENIED")
+    conn.commit()
+    conn.close()
+    return {"status": "DENIED"}
 
+@app.post("/api/tpa/fraud/{claim_id}/clear")
+async def fraud_clear(claim_id: int, user: dict = Depends(require_role(["TPA_FRAUD_ANALYST"]))):
+    conn = db.get_db()
+    conn.execute("UPDATE claims SET status='UNDER_REVIEW' WHERE id=?", (claim_id,))
+    db.log_audit(conn, claim_id=claim_id, action="FRAUD_CLEARED", user_id=user["user_id"], to_status="UNDER_REVIEW")
+    conn.commit()
+    conn.close()
+    return {"status": "UNDER_REVIEW"}
 
 @app.post("/api/demo/seed")
-async def demo_seed():
-    if (os.getenv("APP_ENV") or "dev").lower() in ("prod", "production"):
-        raise HTTPException(403, "DEMO_ENDPOINT_DISABLED_IN_PRODUCTION")
-    import random
-    from generate_synthetic_data import generate
-    DENIAL_CODES = [
-        ("45", "Charge exceeds fee schedule/maximum allowable"),
-        ("97", "Claim/service denied — not covered by benefit plan"),
-        ("4", "Service/drug/supply is not covered"),
-        ("18", "Duplicate claim/service"),
-        ("16", "Claim/service lacks information"),
-        ("29", "Filing deadline exceeded (>14 days)"),
-    ]
-    claims = generate(60)
-    seeded = 0
-    for claim in claims:
-        raw = f"Patient: {claim['patient_name']}\nDiagnosis: {claim['diagnosis']}\nTotal: RM {claim['total_amount_myr']}"
-        claim_id = db.insert_claim(raw, extracted=claim)
-        decisions_pool = ["APPROVED", "APPROVED", "APPROVED", "APPROVED", "DENIED", "REFERRED"]
-        decision = random.choice(decisions_pool)
-        amt = claim.get("total_amount_myr", 0)
-        carc, carc_desc = random.choice(DENIAL_CODES) if decision == "DENIED" else (None, None)
-        db.insert_decision(claim_id, {
-            "decision": decision, "confidence": round(random.uniform(0.72, 0.98), 2),
-            "reasoning": f"Claim for {claim['diagnosis']} assessed against PMCare policy guidelines. "
-                         f"{'Coverage confirmed within benefit limits.' if decision == 'APPROVED' else 'Claim does not meet coverage criteria.'}",
-            "amount_approved_myr": amt if decision == "APPROVED" else 0,
-            "amount_denied_myr": amt if decision == "DENIED" else 0,
-            "patient_responsibility_myr": claim.get("consultation_fee_myr", 10) if decision == "APPROVED" else 0,
-            "denial_reason_code": carc, "denial_reason_description": carc_desc,
-            "is_auto_adjudicated": 1,
-        })
-        is_sus = claim.get("is_suspicious", False)
-        risk = round(random.uniform(0.55, 0.92), 2) if is_sus else round(random.uniform(0.02, 0.35), 2)
-        level = "HIGH" if risk > 0.7 else ("MEDIUM" if risk > 0.4 else "LOW")
-        db.insert_fraud_score(claim_id, {
-            "fraud_risk_score": risk, "risk_level": level,
-            "flags": [{"flag_type": "EXCESSIVE_AMOUNT", "description": "Billed amount exceeds peer benchmark by >80%",
-                       "severity": risk, "evidence": f"RM {amt:.2f} vs benchmark RM {amt*0.55:.2f}"}] if is_sus else [],
-            "recommendation": "INVESTIGATE" if is_sus else "PROCEED",
-        })
-        db.insert_advisory(claim_id, {
-            "summary": f"Your claim for {claim['diagnosis']} (RM {amt:.2f}) has been {decision.lower()}.",
-            "summary_bm": f"Tuntutan anda untuk {claim['diagnosis']} (RM {amt:.2f}) telah {'diluluskan' if decision=='APPROVED' else 'ditolak'}.",
-            "action_items": [{"action": "No further action needed" if decision == "APPROVED" else "Review denial code and consider appeal", "priority": "LOW" if decision == "APPROVED" else "HIGH", "deadline": "Within 30 days"}],
-        })
-        db.update_claim(claim_id, status=decision, auto_adjudicated=1,
-                        clean_claim_flag=1 if decision == "APPROVED" else 0,
-                        fraud_flagged=1 if is_sus else 0,
-                        ar_days=round(random.uniform(1, 45), 1),
-                        cycle_time_hours=round(random.uniform(0.1, 72), 1))
-        seeded += 1
-    return {"seeded": seeded, "message": f"Seeded {seeded} fully-processed demo claims"}
+async def demo_seed(user: dict = Depends(require_role(["SYSTEM_ADMIN"]))):
+    from generate_synthetic_data import seed_hackathon_demo
+    return seed_hackathon_demo()
 
+@app.get("/api/metrics")
+async def metrics(user: dict = Depends(get_current_user)):
+    usage = glm_client.get_token_metrics()
+    summary = db.get_analytics_summary()
+    total_claims = summary.get("total_claims") or 0
+    total_tokens = usage.get("total_tokens") or 0
+    usage["avg_tokens_per_claim"] = round(total_tokens / total_claims, 2) if total_claims else 0.0
+    return usage
 
-# ── Health ──────────────────────────────────────────────────
+@app.get("/api/analytics/summary")
+async def analytics_summary(user: dict = Depends(get_current_user)):
+    return db.get_analytics_summary()
+
+@app.get("/api/analytics/denials")
+async def analytics_denials(user: dict = Depends(get_current_user)):
+    return {"breakdown": db.get_denial_breakdown()}
+
+@app.get("/api/analytics/clinics")
+async def analytics_clinics(user: dict = Depends(require_role(["TPA_PROCESSOR", "TPA_FRAUD_ANALYST", "SYSTEM_ADMIN"]))):
+    return {"clinics": db.get_clinic_analytics()}
+
+@app.get("/api/analytics/mc-patterns")
+async def analytics_mc_patterns(user: dict = Depends(require_role(["TPA_PROCESSOR", "TPA_FRAUD_ANALYST", "SYSTEM_ADMIN"]))):
+    return mc_analytics.get_mc_behavior_patterns()
+
+@app.get("/api/analytics/fraud-heatmap")
+async def analytics_fraud_heatmap(user: dict = Depends(get_current_user)):
+    conn = db.get_db()
+    tf_clause, tf_params = db._tenant_filter(user)
+    where = f"WHERE {tf_clause}" if tf_clause else ""
+    rows = conn.execute(
+        "SELECT c.id AS claim_id, c.clinic_name, c.diagnosis, c.total_amount_myr, "
+        "f.risk_score, f.risk_level "
+        "FROM fraud_scores f JOIN claims c ON c.id=f.claim_id "
+        f"{where} ORDER BY f.id DESC",
+        tf_params,
+    ).fetchall()
+    conn.close()
+    return {"heatmap_data": [dict(r) for r in rows]}
+
+@app.get("/api/analytics/weekly-report")
+async def analytics_weekly_report(user: dict = Depends(get_current_user)):
+    summary = db.get_analytics_summary()
+    return glm_client.generate_weekly_report(summary)
+
+@app.post("/api/fhir/coverage-eligibility")
+async def fhir_coverage_eligibility(body: CoverageEligibilityRequest, user: dict = Depends(get_current_user)):
+    result = eligibility_engine.check_eligibility(body.ic_number, body.visit_date, body.total_amount_myr)
+    eligible = bool(result.get("eligible"))
+    covered = float(result.get("covered_amount_myr") or 0.0)
+    patient_resp = float(result.get("patient_responsibility_myr") or 0.0)
+    return {
+        "resourceType": "EligibilityResponse",
+        "outcome": "complete",
+        "insurance": [{
+            "inforce": eligible,
+            "benefitBalance": [{
+                "financial": [
+                    {"type": {"text": "covered"}, "allowedMoney": {"value": covered, "currency": "MYR"}},
+                    {"type": {"text": "patient_responsibility"}, "allowedMoney": {"value": patient_resp, "currency": "MYR"}},
+                ]
+            }],
+        }],
+        "meta": {"generated_at": datetime.now(timezone.utc).isoformat()},
+    }
+
+@app.get("/api/claims/{claim_id}/export")
+async def export_claim(claim_id: int, user: dict = Depends(get_current_user)):
+    claim = db.get_full_claim(claim_id)
+    if not claim:
+        raise HTTPException(404, "Claim not found")
+    tf_clause, tf_params = db._tenant_filter(user)
+    if tf_clause:
+        conn = db.get_db()
+        row = conn.execute(f"SELECT id FROM claims WHERE id=? AND ({tf_clause})", [claim_id] + tf_params).fetchone()
+        conn.close()
+        if not row:
+            raise HTTPException(404, "Claim not found")
+    return {"claim_id": claim_id, "claim": claim}
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "ClaimIQ", "version": "2.0", "engine": "Z.AI GLM"}
-
-
-# ── Static files ────────────────────────────────────────────
+    return {"status": "ok", "service": "ClaimIQ MVP"}
 
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.isdir(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
-
 
 if __name__ == "__main__":
     import uvicorn

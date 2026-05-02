@@ -25,15 +25,23 @@ import eligibility_engine
 import eob_generator
 import evidence_parser
 import cross_reference_engine
+import denial_predictor
+import fraud_graph
+import drg_mapper
+import disposition_engine
 
 logger = logging.getLogger("claimiq.processor")
 
 def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
+    """Run the full claim pipeline and persist decision artifacts."""
     claim = None
-    if claim_id and not raw_text:
+    if claim_id is not None and claim_id <= 0:
+        raise ValueError("claim_id must be a positive integer")
+    if claim_id:
         claim = db.get_claim(claim_id)
         if not claim: raise ValueError(f"Claim {claim_id} not found")
-        raw_text = claim["raw_text"]
+        # Prefer explicit raw_text when supplied, otherwise use persisted claim payload.
+        raw_text = raw_text or claim["raw_text"]
     elif raw_text and not claim_id:
         claim_id = db.insert_claim(raw_text)
         claim = db.get_claim(claim_id)
@@ -59,6 +67,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             # These were stored in extracted_data during submit_claim and should NOT be
             # overwritten by LLM extraction or mock fallback.
             initial_data_str = claim.get("extracted_data") if claim else None
+            initial_data = {}
             if initial_data_str:
                 try:
                     initial_data = json.loads(initial_data_str) if isinstance(initial_data_str, str) else initial_data_str
@@ -67,7 +76,12 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                         if initial_data.get(key):
                             extracted[key] = initial_data[key]
                 except (json.JSONDecodeError, TypeError):
-                    pass
+                    initial_data = {}
+
+            # Preserve evidence payload for downstream parsing and potential reprocessing.
+            for key in ["_evidence_base64", "_invoice_base64", "_bill_attached", "_evidence_attached"]:
+                if initial_data.get(key):
+                    extracted[key] = initial_data[key]
 
             extracted["raw_text"] = raw_text
             try:
@@ -84,7 +98,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
 
             # Step 3.5: Evidence Parsing
             logger.info(f"[{claim_id}] Step 3.5: Parsing evidence with MedGemma...")
-            evidence_b64 = claim.get("extracted_data")
+            evidence_b64 = extracted
             parsed_evidence_list = []
             if evidence_b64:
                 try:
@@ -141,6 +155,7 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             cross_ref = cross_reference_engine.cross_reference_all(parsed_evidence_list, extracted, raw_text)
             result["steps"]["cross_reference"] = cross_ref
             db.update_claim(claim_id, cross_ref_result=json.dumps(cross_ref))
+            result["steps"]["deterministic_validation"] = cross_ref.get("deterministic_summary", {})
 
             if cross_ref["verdict"] == "FAIL" and cross_ref.get("critical_count", 0) > 0:
                 logger.warning(f"[{claim_id}] CROSS-REFERENCE GATE: {cross_ref['critical_count']} critical contradictions found")
@@ -163,11 +178,29 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 db.insert_fraud_score(claim_id, fraud_data)
                 db.update_claim(claim_id, fraud_flagged=1)
                 
-                contradiction_notes = "; ".join(chk["note"] for chk in cross_ref.get("checks", []))
+                contradiction_notes = "; ".join(
+                    str(chk.get("note") or "Contradiction detected")
+                    for chk in (cross_ref.get("checks") or [])
+                )
                 pipeline_findings.append({
                     "severity": "CRITICAL",
                     "source": "CROSS_REFERENCE",
                     "detail": f"⚠️ FRAUD ALERT: {contradiction_notes}"
+                })
+
+            # Stage-2 gating: critical deterministic mismatches force manual review.
+            validation_findings = cross_ref.get("validation_findings", [])
+            critical_validation = [
+                f for f in validation_findings
+                if f.get("severity") == "CRITICAL"
+                and f.get("type") in ("IDENTITY_MISMATCH", "DATE_MISMATCH")
+            ]
+            for f in critical_validation:
+                pipeline_findings.append({
+                    "severity": "CRITICAL",
+                    "source": "VALIDATION",
+                    "detail": f.get("note", "Critical claim/evidence mismatch detected."),
+                    "carc": "16",
                 })
 
             # Step 1: Scrubbing
@@ -209,6 +242,36 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                     "carc": eligibility.get("carc_code", "27")
                 })
 
+            # Phase-1 deterministic disposition hard gates (can finalize before LLM).
+            disposition = disposition_engine.evaluate_phase1_disposition(
+                claim_record=claim,
+                extracted=extracted,
+                cross_ref=cross_ref,
+                eligibility=eligibility,
+                parsed_evidence_list=parsed_evidence_list,
+            )
+            result["steps"]["disposition"] = disposition
+            if disposition.get("finalize_now"):
+                reasons = [f"- {h.get('rule_id')}: {h.get('reason')}" for h in disposition.get("rule_hits", [])]
+                decision = {
+                    "decision": disposition.get("mapped_status", "UNDER_REVIEW"),
+                    "confidence": 1.0,
+                    "reasoning": "Deterministic policy hard-gate triggered.\n" + "\n".join(reasons),
+                    "denial_reason_code": "16" if disposition.get("disposition_class") == "REJECT_INVALID" else "29",
+                    "denial_reason_description": "Rejected due to invalid claim integrity." if disposition.get("disposition_class") == "REJECT_INVALID" else "Denied due to policy/timely filing/eligibility rules.",
+                    "is_auto_adjudicated": 1,
+                    "disposition_class": disposition.get("disposition_class"),
+                    "rule_hits": disposition.get("rule_hits", []),
+                    "policy_version": disposition.get("policy_version"),
+                    "appealable": disposition.get("appealable"),
+                }
+                db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=1)
+                final_status = disposition.get("mapped_status", "UNDER_REVIEW")
+                db.update_claim(claim_id, status=final_status, lifecycle_stage=final_status, auto_adjudicated=1)
+                result["final_status"] = final_status
+                result["steps"]["adjudication"] = decision
+                return result
+
             # Step 4: Clinical Validation
             logger.info(f"[{claim_id}] Step 4: Clinical Validation...")
             clinical_val = glm_client.validate_claim_pre_adjudication(extracted)
@@ -219,29 +282,70 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             coded = glm_client.assign_medical_codes(extracted)
             db.update_claim(claim_id, coded_data=json.dumps(coded), icd10_code=coded.get("primary_diagnosis_code"))
             result["steps"]["coding"] = coded
+            result["steps"]["drg"] = drg_mapper.map_icd_to_drg(coded.get("primary_diagnosis_code"))
             full_claim = {**extracted, **coded}
             if parsed_evidence_list:
                 full_claim["_parsed_evidence"] = parsed_evidence_list
             full_claim["_cross_reference_result"] = cross_ref
+            full_claim["_validation_result"] = {
+                "summary": cross_ref.get("deterministic_summary", {}),
+                "findings": validation_findings,
+            }
 
             # Step 6: Adjudication — attach full raw_text (incl. evidence packet) for GLM reasoning
             logger.info(f"[{claim_id}] Step 6: Policy Adjudication...")
             policy_context = rag_engine.get_policy_context(extracted)
             full_claim_with_evidence = {**full_claim, "_raw_evidence_packet": raw_text}
             decision = glm_client.adjudicate_claim(full_claim_with_evidence, policy_context)
+            decision["denial_prediction"] = denial_predictor.predict_denial(full_claim_with_evidence)
+            result["steps"]["denial_predictor"] = decision["denial_prediction"]
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=0)
             result["steps"]["adjudication"] = decision
 
             # Step 7: Fraud Detection
             logger.info(f"[{claim_id}] Step 7: Fraud Detection...")
+            
+            # MC Behavioral Analytics (Ultra Plan)
+            import mc_analytics
+            patient_mc_risk = mc_analytics.calculate_patient_mc_risk(extracted.get("patient_ic"))
+            clinic_mc_risk = mc_analytics.calculate_clinic_mc_risk(extracted.get("clinic_id"))
+            
+            db.update_claim(claim_id, patient_mc_risk_score=patient_mc_risk, clinic_mc_risk_score=clinic_mc_risk)
+            
             fraud = glm_client.detect_fraud_patterns(full_claim)
+            graph_signal = fraud_graph.analyze_claim_network(extracted)
+            fraud["graph_signal"] = graph_signal
+            base_score = float(fraud.get("fraud_risk_score") or 0.0)
+            
+            # Boost fraud score if MC abuse is detected
+            if patient_mc_risk > 0.5:
+                base_score = max(base_score, 0.75)
+                fraud.setdefault("flags", []).append({
+                    "flag_type": "HR_ALERT_MC_ABUSE",
+                    "description": "PRIORITY HR ALERT: Suspected Sick Leave Abuse (Weekend Extension Pattern)",
+                    "severity": 0.8
+                })
+                pipeline_findings.append({
+                    "severity": "WARN", # WARN so it doesn't block claim payment, just alerts
+                    "source": "MC_BEHAVIORAL_ANALYTICS",
+                    "detail": "🚨 PRIORITY HR ALERT: Suspected Sick Leave Abuse (Weekend Extension Pattern detected)."
+                })
+                
+            adjusted = min(1.0, base_score * float(graph_signal.get("graph_risk_multiplier", 1.0)))
+            fraud["fraud_risk_score"] = round(adjusted, 4)
+            if adjusted >= 0.85:
+                fraud["risk_level"] = "CRITICAL"
+            elif adjusted >= 0.7:
+                fraud["risk_level"] = "HIGH"
             db.insert_fraud_score(claim_id, fraud)
             db.update_claim(claim_id, fraud_flagged=1 if fraud.get("risk_level") in ["HIGH", "CRITICAL"] else 0)
             result["steps"]["fraud"] = fraud
 
             # Step 8: GP Advisory
             logger.info(f"[{claim_id}] Step 8: Generating GP Advisory...")
-            advisory = glm_client.generate_gp_advisory(decision, extracted)
+            advisory_input = dict(extracted)
+            advisory_input["_validation_result"] = full_claim.get("_validation_result")
+            advisory = glm_client.generate_gp_advisory(decision, advisory_input)
             db.insert_advisory(claim_id, advisory)
             result["steps"]["advisory"] = advisory
 
@@ -261,8 +365,18 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 denial_findings = [f for f in critical_findings if f["source"] in ["ELIGIBILITY"]]
                 fraud_findings = [f for f in critical_findings if f["source"] == "CROSS_REFERENCE"]
                 scrub_findings = [f for f in critical_findings if f["source"] == "SCRUBBER"]
+                validation_mismatch_findings = [f for f in critical_findings if f["source"] == "VALIDATION"]
                 
-                if fraud_findings or fraud_level in ("HIGH", "CRITICAL"):
+                if validation_mismatch_findings:
+                    final_status = "UNDER_REVIEW"
+                    decision["_validation_override"] = True
+                    decision["_ai_decision"] = decision.get("decision")
+                    decision["reasoning"] = (
+                        "Data consistency mismatch detected between submitted claim and supporting evidence.\n\n"
+                        + "\n".join([f"- {x['detail']}" for x in validation_mismatch_findings])
+                        + "\n\nManual verification is required before adjudication can be finalized."
+                    )
+                elif fraud_findings or fraud_level in ("HIGH", "CRITICAL"):
                     final_status = "REFERRED"
                     decision["_fraud_override"] = True
                     decision["_original_decision"] = decision.get("decision")
@@ -279,9 +393,9 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             if final_status == "APPROVED" and fraud_level in ("HIGH", "CRITICAL") and fraud_rec in ("INVESTIGATE", "BLOCK"):
                 logger.warning(
                     f"[{claim_id}] Fraud gating triggered: {fraud_level}/{fraud_rec}. "
-                    f"Overriding '{final_status}' → 'REFERRED'."
+                    f"Overriding '{final_status}' → 'FRAUD_FLAG'."
                 )
-                final_status = "REFERRED"
+                final_status = "FRAUD_FLAG"
                 decision["_fraud_override"] = True
                 decision["_original_decision"] = decision.get("decision")
                 decision["reasoning"] = (
@@ -293,19 +407,21 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 
             # ENFORCE SAFETY FREEZE: All claims must undergo manual review.
             if final_status == "APPROVED":
-                logger.warning(f"[{claim_id}] Safety Freeze: Converting APPROVED to REFERRED for human review.")
-                final_status = "REFERRED"
+                logger.warning(f"[{claim_id}] Safety Freeze: AI recommended APPROVED -> UNDER_REVIEW for human review.")
+                final_status = "UNDER_REVIEW"
                 decision["_freeze_override"] = True
+                decision["_ai_decision"] = "APPROVED"
                 decision["reasoning"] = (
                     decision.get("reasoning", "") + 
                     "\n\n⚠️ SAFETY FREEZE: This claim was marked for APPROVAL, but autonomous adjudication is currently disabled. Human sign-off is required."
                 )
 
-            # ENFORCE: No automatic denials. All DENIED claims must go to REFERRED.
+            # ENFORCE: No automatic denials. All DENIED claims go to PENDING_DENIAL for human sign-off.
             if final_status == "DENIED":
-                logger.warning(f"[{claim_id}] Safety Gate: Converting DENIED to REFERRED for human review.")
-                final_status = "REFERRED"
+                logger.warning(f"[{claim_id}] Safety Gate: AI recommended DENIED -> UNDER_REVIEW for human review.")
+                final_status = "UNDER_REVIEW"
                 decision["_denial_override"] = True
+                decision["_ai_decision"] = "DENIED"
                 decision["reasoning"] = (
                     decision.get("reasoning", "") + 
                     "\n\n⚠️ SAFETY GATE: This claim was marked for DENIAL. "
@@ -313,14 +429,15 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 )
                 
             # Update the decision in DB if it was overridden
-            if decision.get("_fraud_override") or decision.get("_denial_override") or decision.get("_freeze_override") or critical_findings:
+            if decision.get("_fraud_override") or decision.get("_denial_override") or decision.get("_freeze_override") or decision.get("_validation_override") or critical_findings:
                 decision["decision"] = final_status
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=1)
 
             cycle_time = (time.time() - start_time) / 3600 # hours
+            is_clean = (scrub["status"] != "FAIL") and bool(eligibility.get("eligible", False))
             db.update_claim(claim_id, status=final_status, lifecycle_stage=final_status,
-                            clean_claim_flag=0, # Autonomous clean claims disabled during freeze
-                            auto_adjudicated=0, cycle_time_hours=cycle_time, ar_days=1)
+                            clean_claim_flag=1 if is_clean else 0,
+                            auto_adjudicated=1, cycle_time_hours=cycle_time, ar_days=1)
             result["final_status"] = final_status
 
         except glm_client.GLMServiceUnavailable as e:
@@ -339,13 +456,13 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=1)
             db.update_claim(
                 claim_id,
-                status="REFERRED",
-                lifecycle_stage="REFERRED",
+                status="UNDER_REVIEW",
+                lifecycle_stage="UNDER_REVIEW",
                 clean_claim_flag=0,
                 auto_adjudicated=0,
             )
             result["error"] = str(e)
-            result["final_status"] = "REFERRED"
+            result["final_status"] = "UNDER_REVIEW"
         except Exception as e:
             logger.error(f"[{claim_id}] Pipeline failed: {e}")
             db.update_claim(claim_id, status="ERROR", lifecycle_stage="ERROR")

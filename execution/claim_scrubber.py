@@ -14,7 +14,7 @@ Checks:
 """
 
 import sys, os, json, logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(__file__))
 import database as db
@@ -154,7 +154,7 @@ def scrub_claim(claim_data: dict, claim_id: int = None) -> dict:
         "warnings": warnings,
         "carc_code": carc,
         "checks_run": len(REQUIRED_FIELDS) + 5,
-        "scraped_at": datetime.utcnow().isoformat(),
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

@@ -1,0 +1,26 @@
+{
+  "policy_version": "2026.05.phase1",
+  "timely_filing_days": 14,
+  "date_tolerance_days": 30,
+  "identity_mismatch_action": "REJECT_INVALID",
+  "timely_filing_action": "DENY_POLICY",
+  "missing_parse_with_attachment_action": "PEND_REVIEW",
+  "status_map": {
+    "REJECT_INVALID": "DENIED",
+    "DENY_POLICY": "DENIED",
+    "PEND_REVIEW": "UNDER_REVIEW",
+    "APPROVE": "APPROVED"
+  },
+  "appealability": {
+    "REJECT_INVALID": false,
+    "DENY_POLICY": true,
+    "PEND_REVIEW": true,
+    "APPROVE": false
+  },
+  "rules": {
+    "ID_MATCH_001": "Patient identity must match across claim and supporting evidence.",
+    "TF_LIMIT_001": "Claims must be filed within timely-filing window from visit date.",
+    "DOC_DATE_001": "Evidence document date must be plausible relative to encounter date.",
+    "PARSE_001": "If attachments are declared but parsing fails, claim cannot auto-adjudicate."
+  }
+}

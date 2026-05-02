@@ -25,6 +25,7 @@ load_dotenv()
 logger = logging.getLogger("claimiq.glm")
 _AUTH_FAILURE_UNTIL = 0.0
 _AUTH_FAILURE_REASON = ""
+_TOKEN_METRICS = {"total_tokens": 0, "calls": 0}
 
 
 class GLMServiceUnavailable(RuntimeError):
@@ -68,6 +69,7 @@ def _call_glm(
     temperature: float = 0.3,
     max_tokens: int = 4096,
     retries: int = 3,
+    claim_id: int = None
 ) -> str:
     """Core GLM API call with structured output, retry logic, and logging."""
     global _AUTH_FAILURE_UNTIL, _AUTH_FAILURE_REASON
@@ -116,6 +118,35 @@ def _call_glm(
             content = response.choices[0].message.content
             usage = response.usage.total_tokens if response.usage else "?"
             logger.info(f"GLM response in {elapsed:.2f}s | tokens={usage}")
+            if response.usage and response.usage.total_tokens:
+                _TOKEN_METRICS["total_tokens"] += int(response.usage.total_tokens)
+                _TOKEN_METRICS["calls"] += 1
+                try:
+                    import database as db
+                    conn = db.get_db()
+                    cost = (response.usage.total_tokens / 1000) * 0.00006
+                    conn.execute(
+                        "INSERT INTO token_usage (id, claim_id, prompt_tokens, completion_tokens, total_tokens, cost_myr) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (os.urandom(16).hex(), claim_id, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens, cost)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as db_e:
+                    logger.error(f"Failed to log token usage to DB: {db_e}")
+                try:
+                    import database as db
+                    conn = db.get_db()
+                    cost = (response.usage.total_tokens / 1000) * 0.00006
+                    conn.execute(
+                        "INSERT INTO token_usage (id, claim_id, prompt_tokens, completion_tokens, total_tokens, cost_myr) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (os.urandom(16).hex(), claim_id, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens, cost)
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as db_e:
+                    logger.error(f"Failed to log token usage to DB: {db_e}")
             
             # Robust JSON cleaning
             if json_mode and content:
@@ -159,11 +190,11 @@ def _generate_unique_mock_visit_date(scenario_key: str, user_prompt: str) -> str
     Generate a recent visit date (within filing window) that varies between runs.
     This helps avoid duplicate-key collisions in repeated E2E tests.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
-    seed = f"{scenario_key}|{user_prompt}|{datetime.utcnow().isoformat()}"
+    seed = f"{scenario_key}|{user_prompt}|{datetime.now(timezone.utc).isoformat()}"
     offset_days = (int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % 13) + 1
-    return (datetime.utcnow().date() - timedelta(days=offset_days)).isoformat()
+    return (datetime.now(timezone.utc).date() - timedelta(days=offset_days)).isoformat()
 
 def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
     """Provides highly realistic industry-standard mock responses if Z.AI API is unreachable."""
@@ -353,11 +384,16 @@ ADJUDICATION_SYSTEM = (
     "You are the ClaimIQ Adjudication Engine (Senior Medical Auditor) for Malaysian TPA claims. "
     "Output JSON: decision (APPROVED|DENIED|REFERRED), confidence (0-1), "
     "reasoning (must be highly detailed, citing specific lab values, X-ray findings, or clinical notes provided in the ATTACHED EVIDENCE), "
+    "reasoning_citations (array of {clinical_basis, policy_reference, risk_flags}), "
     "policy_references (array), amount_approved_myr, amount_denied_myr, "
     "denial_reasons (array), conditions (array), appeal_recommendation, "
     "processing_notes, adjudication_confidence (0-1). "
     "Check: coverage, amount limits, medical necessity, medication appropriateness. "
-    "CRITICAL: If the itemized bill or lab evidence is missing for complex claims, DENY or REFER the claim for 'Missing Supporting Evidence'."
+    "CRITICAL: You must ground all conclusions in provided evidence sections and deterministic rule outputs. "
+    "If deterministic validation contains IDENTITY_MISMATCH or DATE_MISMATCH with CRITICAL severity, "
+    "set decision to REFERRED and explain mismatch first before any coverage logic. "
+    "Do not claim 'missing supporting documents' when parsed evidence includes relevant invoice/lab sections. "
+    "When rule_hits are present, cite rule IDs explicitly in reasoning_citations."
 )
 
 FRAUD_SYSTEM = (
@@ -377,7 +413,8 @@ ADVISORY_SYSTEM = (
     "action_items (array of {action,priority,deadline}), documentation_tips (array), "
     "coding_suggestions (array), financial_impact ({approved_amount_myr, "
     "potential_recovery_myr, optimization_savings_myr}), educational_notes. "
-    "Be supportive, actionable, include BM translation."
+    "Be supportive, actionable, include BM translation. "
+    "Do not introduce facts not present in claim/evidence/validation sections."
 )
 
 SYNTHETIC_SYSTEM = (
@@ -415,9 +452,9 @@ INVOICE_VAL_SYSTEM = (
 
 # --- 5 Core Functions ---
 
-def extract_claim_data(raw_text: str) -> dict:
+def extract_claim_data(raw_text: str, claim_id: int = None) -> dict:
     """GLM Fn 1: Unstructured clinical text -> structured claim JSON."""
-    result = _call_glm(EXTRACT_SYSTEM, f"Extract claim data:\n\n{raw_text}", temperature=0.1)
+    result = _call_glm(EXTRACT_SYSTEM, f"Extract claim data:\n\n{raw_text}", temperature=0.1, claim_id=claim_id)
     data = json.loads(result)
 
     # Check which required fields are missing from live extraction
@@ -454,12 +491,13 @@ def assign_medical_codes(claim_data: dict) -> dict:
     return json.loads(result)
 
 
-def adjudicate_claim(coded_claim: dict, policy_context: str) -> dict:
+def adjudicate_claim(coded_claim: dict, policy_context: str, claim_id: int = None) -> dict:
     """GLM Fn 3: RAG-powered claims adjudication with evidence packet."""
     # Pull out special fields before serializing
     evidence_packet = coded_claim.pop("_raw_evidence_packet", None)
     parsed_ev = coded_claim.pop("_parsed_evidence", None)
     xref_res = coded_claim.pop("_cross_reference_result", None)
+    validation_res = coded_claim.pop("_validation_result", None)
     coded_claim.pop("_fallback_fields", None)  # don't send internal metadata to LLM
 
     # Build evidence sections
@@ -468,26 +506,31 @@ def adjudicate_claim(coded_claim: dict, policy_context: str) -> dict:
         sections.append(f"\n\n## Parsed Evidence (via MedGemma)\n{json.dumps(parsed_ev, indent=2)}")
     if xref_res:
         sections.append(f"\n\n## Cross-Reference Engine Results\n{json.dumps(xref_res, indent=2)}")
+    if validation_res:
+        sections.append(f"\n\n## Deterministic Validation Findings\n{json.dumps(validation_res, indent=2)}")
     if evidence_packet:
         sections.append(f"\n\n## Raw Clinical Evidence Packet\n{evidence_packet}")
 
     evidence_section = "".join(sections)
     prompt = f"## Claim\n{json.dumps(coded_claim, indent=2)}\n\n## Policy\n{policy_context}{evidence_section}"
-    result = _call_glm(ADJUDICATION_SYSTEM, f"Adjudicate:\n\n{prompt}", temperature=0.2)
+    result = _call_glm(ADJUDICATION_SYSTEM, f"Adjudicate:\n\n{prompt}", temperature=0.2, claim_id=claim_id)
     return json.loads(result)
 
 
-def detect_fraud_patterns(claim: dict, historical_context: Optional[str] = None) -> dict:
+def detect_fraud_patterns(claim: dict, historical_context: Optional[str] = None, claim_id: int = None) -> dict:
     """GLM Fn 4: Fraud pattern analysis."""
     ctx = historical_context or "No historical data available."
     prompt = f"## Claim\n{json.dumps(claim, indent=2)}\n\n## History\n{ctx}"
-    result = _call_glm(FRAUD_SYSTEM, f"Analyze fraud:\n\n{prompt}", temperature=0.3)
+    result = _call_glm(FRAUD_SYSTEM, f"Analyze fraud:\n\n{prompt}", temperature=0.3, claim_id=claim_id)
     return json.loads(result)
 
 
 def generate_gp_advisory(decision: dict, claim_data: dict) -> dict:
     """GLM Fn 5: Plain-language GP advisory."""
+    validation_res = claim_data.get("_validation_result")
     prompt = f"## Decision\n{json.dumps(decision, indent=2)}\n\n## Claim\n{json.dumps(claim_data, indent=2)}"
+    if validation_res:
+        prompt += f"\n\n## Deterministic Validation Findings\n{json.dumps(validation_res, indent=2)}"
     result = _call_glm(ADVISORY_SYSTEM, f"Generate advisory:\n\n{prompt}", temperature=0.5)
     return json.loads(result)
 
@@ -591,6 +634,10 @@ def answer_claim_question(question: str, claim_context: dict) -> dict:
     )
     result = _call_glm(CHAT_SYSTEM, f"Answer:\n\n{prompt}", temperature=0.5)
     return json.loads(result)
+
+
+def get_token_metrics() -> dict:
+    return dict(_TOKEN_METRICS)
 
 
 if __name__ == "__main__":

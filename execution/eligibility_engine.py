@@ -10,6 +10,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(__file__))
 import database as db
+import copay_engine
 
 logger = logging.getLogger("claimiq.eligibility")
 
@@ -102,7 +103,8 @@ def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float =
                 "member": dict(member), "patient_responsibility_myr": total_amount}
 
     # Calculate patient responsibility
-    copay = member["copay_myr"] or 10
+    copay_calc = copay_engine.compute_copay(total_amount, member.get("icd10_code"), member.get("clinic_name"))
+    copay = copay_calc["copay_myr"] if copay_calc else (member["copay_myr"] or 10)
     max_visit = member["max_per_visit_myr"] or 200
     covered = max(0.0, min(total_amount, max_visit, limit - used))
     patient_resp = total_amount - covered + copay
@@ -127,6 +129,7 @@ def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float =
         "covered_amount_myr": round(covered, 2),
         "patient_responsibility_myr": round(patient_resp, 2),
         "copay_myr": copay,
+        "copay_rule": copay_calc.get("rule") if copay_calc else "PLAN_DEFAULT",
         "remaining_benefit_myr": round(limit - used - covered, 2),
         "max_per_visit_myr": max_visit,
     }

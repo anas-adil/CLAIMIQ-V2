@@ -23,6 +23,7 @@ load_dotenv()
 logger = logging.getLogger("claimiq.db")
 
 DB_PATH = os.getenv("DB_PATH", ".tmp/claimiq.db")
+os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 # 10-state lifecycle (matches real TPA workflow)
 CLAIM_STATES = [
@@ -77,6 +78,12 @@ CREATE TABLE IF NOT EXISTS claims (
     auto_adjudicated INTEGER DEFAULT 0,
     fraud_flagged INTEGER DEFAULT 0,
     requires_prior_auth INTEGER DEFAULT 0,
+
+    -- MC Tracking & Predictive Risk
+    is_mc_issued INTEGER DEFAULT 0,
+    mc_days INTEGER DEFAULT 0,
+    patient_mc_risk_score REAL DEFAULT 0.0,
+    clinic_mc_risk_score REAL DEFAULT 0.0,
 
     -- Timeline
     intake_at TEXT DEFAULT (datetime('now')),
@@ -203,6 +210,11 @@ CREATE TABLE IF NOT EXISTS audit_log (
     from_status TEXT,
     to_status TEXT,
     details TEXT,
+    data_classification TEXT DEFAULT 'SYNTHETIC_PDPA_LOW',
+    retention_period TEXT DEFAULT '7Y',
+    data_minimization_applied INTEGER DEFAULT 1,
+    consent_basis TEXT DEFAULT 'CONTRACTUAL_NECESSITY',
+    cross_border_transfer TEXT DEFAULT 'AP-SOUTHEAST-1',
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -282,11 +294,108 @@ def _migration_3_eligibility_consumptions(conn: sqlite3.Connection):
         "created_at TEXT DEFAULT (datetime('now')))"
     )
 
+def _migration_4_pdpa_audit_fields(conn: sqlite3.Connection):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
+    cols = {
+        "data_classification": "TEXT DEFAULT 'SYNTHETIC_PDPA_LOW'",
+        "retention_period": "TEXT DEFAULT '7Y'",
+        "data_minimization_applied": "INTEGER DEFAULT 1",
+        "consent_basis": "TEXT DEFAULT 'CONTRACTUAL_NECESSITY'",
+        "cross_border_transfer": "TEXT DEFAULT 'AP-SOUTHEAST-1'",
+    }
+    for col, ddl in cols.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE audit_log ADD COLUMN {col} {ddl}")
+
+def _migration_5_hackathon_mvp(conn: sqlite3.Connection):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        full_name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        tenant_type TEXT NOT NULL,
+        clinic_id TEXT,
+        tpa_id TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS clinics (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        moh_reg_number TEXT UNIQUE NOT NULL,
+        panel_tpa_ids TEXT DEFAULT '[]',
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS tpas (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        license_number TEXT UNIQUE NOT NULL,
+        contact_email TEXT NOT NULL,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL,
+        revoked INTEGER DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS action_notes (
+        id TEXT PRIMARY KEY,
+        claim_id INTEGER,
+        user_id TEXT,
+        action_type TEXT,
+        note_text TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS token_usage (
+        id TEXT PRIMARY KEY,
+        claim_id INTEGER,
+        prompt_tokens INTEGER,
+        completion_tokens INTEGER,
+        total_tokens INTEGER,
+        cost_myr REAL
+    );
+    """)
+    existing_audit = {row[1] for row in conn.execute("PRAGMA table_info(audit_log)").fetchall()}
+    if "user_id" not in existing_audit:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN user_id TEXT")
+    if "target_id" not in existing_audit:
+        conn.execute("ALTER TABLE audit_log ADD COLUMN target_id TEXT")
+        
+    existing_claims = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+    if "tpa_id" not in existing_claims:
+        conn.execute("ALTER TABLE claims ADD COLUMN tpa_id TEXT")
+    if "diagnosis_codes" not in existing_claims:
+        conn.execute("ALTER TABLE claims ADD COLUMN diagnosis_codes TEXT")
+    if "line_items" not in existing_claims:
+        conn.execute("ALTER TABLE claims ADD COLUMN line_items TEXT")
+
+
+def _migration_6_mc_tracking_and_risk(conn: sqlite3.Connection):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+    migrations = {
+        "is_mc_issued": "INTEGER DEFAULT 0",
+        "mc_days": "INTEGER DEFAULT 0",
+        "patient_mc_risk_score": "REAL DEFAULT 0.0",
+        "clinic_mc_risk_score": "REAL DEFAULT 0.0",
+    }
+    for col, dtype in migrations.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE claims ADD COLUMN {col} {dtype}")
 
 MIGRATIONS = [
     (1, "claim_enrichment", _migration_1_claim_enrichment),
     (2, "decision_versioning", _migration_2_decision_versioning),
     (3, "eligibility_consumptions", _migration_3_eligibility_consumptions),
+    (4, "pdpa_audit_fields", _migration_4_pdpa_audit_fields),
+    (5, "hackathon_mvp", _migration_5_hackathon_mvp),
+    (6, "mc_tracking_and_risk", _migration_6_mc_tracking_and_risk),
 ]
 
 
@@ -336,12 +445,33 @@ def release_processing_lock(claim_id: int):
     db.close()
 
 
-def log_audit(db: sqlite3.Connection, claim_id: int, action: str, from_status: str = None,
-              to_status: str = None, details: str = None, actor: str = "SYSTEM"):
+def log_audit(db: sqlite3.Connection, claim_id: int = None, action: str = "ACTION", from_status: str = None,
+              to_status: str = None, details: str = None, actor: str = "SYSTEM",
+              data_classification: str = "SYNTHETIC_PDPA_LOW",
+              retention_period: str = "7Y",
+              data_minimization_applied: int = 1,
+              consent_basis: str = "CONTRACTUAL_NECESSITY",
+              cross_border_transfer: str = "AP-SOUTHEAST-1",
+              user_id: str = None, target_id: str = None):
     db.execute(
-        "INSERT INTO audit_log (claim_id, actor, action, from_status, to_status, details) VALUES (?,?,?,?,?,?)",
-        (claim_id, actor, action, from_status, to_status, details),
+        "INSERT INTO audit_log (claim_id, actor, action, from_status, to_status, details, "
+        "data_classification, retention_period, data_minimization_applied, consent_basis, cross_border_transfer, user_id, target_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (claim_id, actor, action, from_status, to_status, details, data_classification,
+         retention_period, data_minimization_applied, consent_basis, cross_border_transfer, user_id, target_id),
     )
+
+def _tenant_filter(user: dict) -> tuple[str, list]:
+    if not user or user.get("role") == "SYSTEM_ADMIN":
+        return "", []
+    if user.get("tenant_type") == "CLINIC":
+        return "clinic_id = ?", [user.get("clinic_id")]
+    # TPA users (TPA_PROCESSOR, TPA_FRAUD_ANALYST) see ALL claims — the TPA
+    # is the adjudicating body for all panel clinics.  tpa_id is not
+    # consistently populated on claims, so we do not filter here.
+    if user.get("tenant_type") == "TPA":
+        return "", []
+    return "1=0", []
 
 
 def insert_claim(raw_text: str, extracted: Optional[dict] = None) -> int:
@@ -351,7 +481,7 @@ def insert_claim(raw_text: str, extracted: Optional[dict] = None) -> int:
         "INSERT INTO claims (raw_text, extracted_data, patient_name, patient_ic, patient_age, "
         "patient_gender, clinic_name, clinic_id, diagnosis, icd10_code, visit_date, "
         "total_amount_myr, consultation_fee_myr, medication_fee_myr, procedure_fee_myr, "
-        "status, lifecycle_stage) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "is_mc_issued, mc_days, status, lifecycle_stage) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             raw_text, ext,
             extracted.get("patient_name") if extracted else None,
@@ -367,6 +497,8 @@ def insert_claim(raw_text: str, extracted: Optional[dict] = None) -> int:
             extracted.get("consultation_fee_myr") if extracted else None,
             extracted.get("medication_fee_myr") if extracted else None,
             extracted.get("procedure_fee_myr") if extracted else None,
+            extracted.get("is_mc_issued", 0) if extracted else 0,
+            extracted.get("mc_days", 0) if extracted else 0,
             "INTAKE", "INTAKE",
         ),
     )
@@ -781,3 +913,4 @@ if __name__ == "__main__":
     db = get_db()
     print(f"Database v2 initialized at {DB_PATH}")
     db.close()
+

@@ -110,6 +110,7 @@ h2 { font-size: 1.1rem; font-weight: 500; color: var(--text-secondary); margin-b
 .kpi-red::before { background: var(--accent-red); }
 .kpi-green::before { background: var(--accent-green); }
 .kpi-purple::before { background: var(--accent-purple); }
+.kpi-yellow::before { background: var(--accent-yellow); }
 .kpi-val { font-size: 2rem; font-weight: 700; color: #fff; font-family: var(--font-mono); }
 .kpi-label { font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
 .kpi-target { font-size: 0.75rem; color: var(--text-secondary); margin-top: 8px; background: rgba(255,255,255,0.05); padding: 2px 6px; border-radius: 4px; display: inline-block; }
@@ -150,6 +151,11 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .badge-REFERRED { background: rgba(139, 92, 246, 0.1); color: #C4B5FD; }
 .badge-PENDING_APPROVAL { background: rgba(16, 185, 129, 0.15); color: #A7F3D0; border: 1px solid rgba(16, 185, 129, 0.3); }
 .badge-APPEALING { background: rgba(245, 158, 11, 0.15); color: #FBBF24; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-APPEAL_APPROVED { background: rgba(16, 185, 129, 0.2); color: #6EE7B7; border: 1px solid rgba(16, 185, 129, 0.4); }
+.badge-APPEAL_DENIED { background: rgba(239, 68, 68, 0.2); color: #FCA5A5; border: 1px solid rgba(239, 68, 68, 0.4); }
+.badge-PENDING_DENIAL { background: rgba(239, 68, 68, 0.15); color: #FCA5A5; border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-ERROR { background: rgba(148, 163, 184, 0.15); color: #94A3B8; }
+.badge-UNKNOWN { background: rgba(148, 163, 184, 0.1); color: #94A3B8; }
 
 /* Lifecycle Progress Bar */
 .lifecycle-bar { display: flex; width: 100%; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden; margin-top: 4px; }
@@ -160,6 +166,11 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .lc-approved { width: 100%; background: var(--accent-green); }
 .lc-pending_approval { width: 80%; background: var(--accent-green); opacity: 0.7; border-right: 2px dashed #fff; }
 .lc-denied { width: 100%; background: var(--accent-red); }
+.lc-referred { width: 70%; background: var(--accent-purple); }
+.lc-appealing { width: 85%; background: var(--accent-yellow); }
+.lc-appeal_approved { width: 100%; background: var(--accent-green); }
+.lc-appeal_denied { width: 100%; background: var(--accent-red); }
+.lc-error { width: 100%; background: var(--text-secondary); }
 
 /* Modals */
 .modal-overlay {
@@ -224,6 +235,9 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .gauge-LOW { border: 4px solid var(--accent-green); color: var(--accent-green); }
 .gauge-MEDIUM { border: 4px solid var(--accent-yellow); color: var(--accent-yellow); }
 .gauge-HIGH { border: 4px solid var(--accent-red); color: var(--accent-red); }
+.gauge-CRITICAL { border: 4px solid #DC2626; color: #DC2626; animation: gaugePulse 1.5s infinite; }
+.gauge-UNKNOWN { border: 4px solid var(--text-secondary); color: var(--text-secondary); }
+@keyframes gaugePulse { 0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.4); } 50% { box-shadow: 0 0 0 8px rgba(220,38,38,0); } }
 
 .risk-bars { margin-top: 16px; }
 .risk-bar-row { display: flex; align-items: center; margin-bottom: 12px; }
@@ -281,4 +295,28 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .upload-zone svg { color: var(--text-secondary); margin-bottom: 12px; }
 .upload-zone p { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 0; }
 .file-name { margin-top: 8px; font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent-green); font-weight: bold; }
-.claim-input { width: 100%; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 16px; color: var(--text-primary); font-family: var(--font-mono); font-size: 0.9rem; resize: vertical; outline: none; }
+
+/* Responsive */
+@media (max-width: 1100px) {
+    .stats-grid { grid-template-columns: repeat(3, 1fr); }
+    .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    .charts-grid,
+    .dashboard-bottom,
+    .fraud-grid,
+    .gp-grid,
+    .denials-grid,
+    .submit-grid,
+    .claim-detail-grid { grid-template-columns: 1fr; }
+    .chat-sidebar { width: 100%; border-left: none; border-top: 1px solid var(--border-color); }
+}
+
+@media (max-width: 760px) {
+    .top-nav { padding: 8px 12px; height: auto; flex-wrap: wrap; gap: 8px; }
+    .global-search { order: 3; width: 100%; max-width: none; margin: 0; }
+    .nav-links { width: 100%; overflow-x: auto; }
+    .main-content { padding: 12px; }
+    .stats-grid { grid-template-columns: 1fr 1fr; }
+    .kpi-grid { grid-template-columns: 1fr; }
+    .view-header { flex-direction: column; gap: 10px; }
+    .modal-content { width: 96%; max-height: 96vh; }
+}
