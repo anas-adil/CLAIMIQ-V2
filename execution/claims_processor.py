@@ -392,8 +392,11 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 elif fraud_findings or fraud_level in ("HIGH", "CRITICAL"):
                     final_status = "REFERRED"
                     decision["_fraud_override"] = True
-                    decision["_original_decision"] = decision.get("decision")
-                    decision["reasoning"] = "\n\n".join([f["detail"] for f in fraud_findings]) + "\n\n" + decision.get("reasoning", "")
+                    decision["_ai_decision"] = decision.get("decision")
+                    decision["_ai_confidence"] = decision.get("confidence")
+                    original_reasoning = decision.get("reasoning", "")
+                    fraud_detail = "\n\n".join([f["detail"] for f in fraud_findings])
+                    decision["reasoning"] = (fraud_detail + "\n\n" + original_reasoning).strip()
                 elif denial_findings:
                     final_status = "DENIED"
                     decision["reasoning"] = denial_findings[0]["detail"]
@@ -410,9 +413,11 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 )
                 final_status = "FRAUD_FLAG"
                 decision["_fraud_override"] = True
-                decision["_original_decision"] = decision.get("decision")
+                decision["_ai_decision"] = decision.get("_ai_decision") or decision.get("decision")
+                decision["_ai_confidence"] = decision.get("_ai_confidence") or decision.get("confidence")
+                original_reasoning = decision.get("reasoning", "")
                 decision["reasoning"] = (
-                    decision.get("reasoning", "") +
+                    original_reasoning +
                     f"\n\n⚠️ FRAUD GATE: This claim was flagged as {fraud_level} risk "
                     f"(score: {fraud.get('fraud_risk_score', '?')}) with recommendation "
                     f"'{fraud_rec}'. Automatically referred for manual review."
@@ -423,20 +428,24 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 logger.warning(f"[{claim_id}] Safety Freeze: AI recommended APPROVED -> UNDER_REVIEW for human review.")
                 final_status = "UNDER_REVIEW"
                 decision["_freeze_override"] = True
-                decision["_ai_decision"] = "APPROVED"
+                decision["_ai_decision"] = decision.get("_ai_decision") or "APPROVED"
+                decision["_ai_confidence"] = decision.get("_ai_confidence") or decision.get("confidence")
+                original_reasoning = decision.get("reasoning", "")
                 decision["reasoning"] = (
-                    decision.get("reasoning", "") + 
+                    original_reasoning + 
                     "\n\n⚠️ SAFETY FREEZE: This claim was marked for APPROVAL, but autonomous adjudication is currently disabled. Human sign-off is required."
                 )
 
-            # ENFORCE: No automatic denials. All DENIED claims go to PENDING_DENIAL for human sign-off.
+            # ENFORCE: No automatic denials. All DENIED claims go to UNDER_REVIEW for human sign-off.
             if final_status == "DENIED":
                 logger.warning(f"[{claim_id}] Safety Gate: AI recommended DENIED -> UNDER_REVIEW for human review.")
                 final_status = "UNDER_REVIEW"
                 decision["_denial_override"] = True
-                decision["_ai_decision"] = "DENIED"
+                decision["_ai_decision"] = decision.get("_ai_decision") or "DENIED"
+                decision["_ai_confidence"] = decision.get("_ai_confidence") or decision.get("confidence")
+                original_reasoning = decision.get("reasoning", "")
                 decision["reasoning"] = (
-                    decision.get("reasoning", "") + 
+                    original_reasoning + 
                     "\n\n⚠️ SAFETY GATE: This claim was marked for DENIAL. "
                     "Per clinical safety rules, it requires human sign-off before final denial."
                 )

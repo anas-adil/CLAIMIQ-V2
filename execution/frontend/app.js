@@ -1057,7 +1057,8 @@ async function openClaim(id) {
                         <h3 style="margin-bottom:16px;font-size:0.9rem;text-transform:uppercase;color:var(--text-secondary);">Adjudication Decision</h3>
                         <div style="margin-bottom:16px;">
                             <span class="badge badge-${decisionObj.decision || 'UNKNOWN'}">${decisionObj.decision || 'UNKNOWN'}</span>
-                            <span style="float:right;font-family:var(--font-mono);font-size:0.85rem;color:var(--text-secondary);">Conf: ${((decisionObj.confidence || 0)*100).toFixed(0)}%</span>
+                            ${decisionObj._ai_decision && decisionObj._ai_decision !== decisionObj.decision ? `<span class="badge badge-${decisionObj._ai_decision}" style="margin-left:8px;opacity:0.7;">AI: ${decisionObj._ai_decision}</span>` : ''}
+                            <span style="float:right;font-family:var(--font-mono);font-size:0.85rem;color:var(--text-secondary);">Conf: ${((decisionObj._ai_confidence || decisionObj.confidence || 0)*100).toFixed(0)}%</span>
                         </div>
                         <p style="font-size:0.9rem;line-height:1.5;background:rgba(0,0,0,0.2);padding:12px;border-radius:var(--radius-sm);">${decisionObj.reasoning || 'No reasoning provided.'}</p>
                         ${decisionObj.denial_prediction ? `<div style="margin-top:10px;font-size:0.85rem;color:var(--text-secondary);">Denial Risk: <b>${Math.round((decisionObj.denial_prediction.denial_probability || 0)*100)}%</b> (${decisionObj.denial_prediction.risk_level || 'UNKNOWN'})</div>` : ''}
@@ -1109,7 +1110,7 @@ async function openClaim(id) {
                     ${(claim.status === 'UNDER_REVIEW' || claim.status === 'PENDING_APPROVAL' || claim.status === 'PENDING_DENIAL') && currentUser && (currentUser.role === 'TPA_PROCESSOR' || currentUser.role === 'SYSTEM_ADMIN') ? `
                     <div class="detail-card" style="margin-top:24px;">
                         <h3 style="margin-bottom:12px;font-size:0.9rem;text-transform:uppercase;color:var(--text-secondary);">Human Review Required</h3>
-                        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:10px;">This claim has been flagged for manual sign-off. AI recommendation: <strong style="color:#fff;">${Object.keys(decisionObj).length ? (decisionObj._ai_decision || decisionObj.decision || 'N/A') : 'N/A'}</strong></p>
+                        <p style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:10px;">This claim has been flagged for manual sign-off. AI recommendation: <strong style="color:#fff;">${Object.keys(decisionObj).length ? (decisionObj._ai_decision || decisionObj.decision || 'N/A') : 'N/A'}</strong>${decisionObj._ai_confidence ? ` (Confidence: ${(decisionObj._ai_confidence*100).toFixed(0)}%)` : ''}</p>
                         <button class="btn btn-primary btn-sm" onclick="submitReview(${claim.id}, 'APPROVE')">✓ Approve</button>
                         <button class="btn btn-ghost btn-sm" style="margin-left:8px;background:rgba(239,68,68,0.15);color:var(--accent-red);" onclick="submitReview(${claim.id}, 'DENY')">✗ Deny</button>
                     </div>` : ''}
