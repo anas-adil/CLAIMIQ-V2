@@ -1,7 +1,7 @@
-import sys, os, json, logging, hashlib, threading
+import sys, os, json, logging, hashlib, threading, base64, uuid
 sys.path.insert(0, os.path.dirname(__file__))
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, constr
@@ -41,6 +41,8 @@ class ClaimSubmission(BaseModel):
     evidence_attached: bool
     evidence_base64: Optional[str] = None
     invoice_base64: Optional[str] = None
+    evidence_upload_id: Optional[str] = None
+    invoice_upload_id: Optional[str] = None
     patient_name: constr(min_length=2, max_length=100)
     patient_ic: constr(pattern=r"^\d{6}-\d{2}-\d{4}$")
     clinic_name: str
@@ -135,6 +137,32 @@ async def logout(
     conn.close()
     return {"message": "Logged out"}
 
+
+@app.post("/api/uploads")
+async def upload_supporting_file(
+    file: UploadFile = File(...),
+    user: dict = Depends(require_role(["CLINIC_USER", "SYSTEM_ADMIN"])),
+):
+    max_bytes = 4 * 1024 * 1024  # Keep comfortably below typical serverless payload ceilings.
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "Uploaded file is empty")
+    if len(content) > max_bytes:
+        raise HTTPException(413, f"File too large. Max allowed is {max_bytes // (1024 * 1024)}MB")
+
+    content_type = file.content_type or "application/octet-stream"
+    encoded = base64.b64encode(content).decode("utf-8")
+    data_url = f"data:{content_type};base64,{encoded}"
+    asset_id = uuid.uuid4().hex
+    db.save_uploaded_asset(
+        asset_id=asset_id,
+        filename=file.filename or "upload.bin",
+        content_type=content_type,
+        content_base64=data_url,
+        uploaded_by=user.get("user_id"),
+    )
+    return {"upload_id": asset_id, "filename": file.filename, "content_type": content_type, "size_bytes": len(content)}
+
 @app.post("/api/claims/submit")
 async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(["CLINIC_USER"]))):
     visit = datetime.strptime(body.visit_date, "%Y-%m-%d").date()
@@ -143,6 +171,20 @@ async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(
 
     # Total amount validation logic is deferred to the scrubber because line items are not parsed yet
         
+    evidence_base64 = body.evidence_base64
+    if body.evidence_upload_id:
+        asset = db.get_uploaded_asset(body.evidence_upload_id)
+        if not asset:
+            raise HTTPException(400, "Evidence upload not found")
+        evidence_base64 = asset.get("content_base64")
+
+    invoice_base64 = body.invoice_base64
+    if body.invoice_upload_id:
+        asset = db.get_uploaded_asset(body.invoice_upload_id)
+        if not asset:
+            raise HTTPException(400, "Invoice upload not found")
+        invoice_base64 = asset.get("content_base64")
+
     conn = db.get_db()
     dup = conn.execute(
         "SELECT id FROM claims WHERE clinic_id=? AND patient_ic=? AND visit_date=? AND ABS(total_amount_myr-?) < 0.01 "
@@ -164,8 +206,8 @@ async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(
              "clinic_name": body.clinic_name,
              "visit_date": body.visit_date,
              "total_amount_myr": body.total_amount_myr,
-             "_evidence_base64": body.evidence_base64,
-             "_invoice_base64": body.invoice_base64,
+             "_evidence_base64": evidence_base64,
+             "_invoice_base64": invoice_base64,
              "_bill_attached": bool(body.bill_attached),
              "_evidence_attached": bool(body.evidence_attached),
          }), body.total_amount_myr)

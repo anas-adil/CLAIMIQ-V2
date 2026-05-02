@@ -416,6 +416,18 @@ def _migration_6_mc_tracking_and_risk(conn: sqlite3.Connection):
         if col not in existing:
             conn.execute(f"ALTER TABLE claims ADD COLUMN {col} {dtype}")
 
+
+def _migration_7_uploaded_assets(conn: sqlite3.Connection):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS uploaded_assets ("
+        "id TEXT PRIMARY KEY,"
+        "filename TEXT,"
+        "content_type TEXT,"
+        "content_base64 TEXT NOT NULL,"
+        "uploaded_by TEXT,"
+        "created_at TEXT DEFAULT (datetime('now')))"
+    )
+
 MIGRATIONS = [
     (1, "claim_enrichment", _migration_1_claim_enrichment),
     (2, "decision_versioning", _migration_2_decision_versioning),
@@ -423,6 +435,7 @@ MIGRATIONS = [
     (4, "pdpa_audit_fields", _migration_4_pdpa_audit_fields),
     (5, "hackathon_mvp", _migration_5_hackathon_mvp),
     (6, "mc_tracking_and_risk", _migration_6_mc_tracking_and_risk),
+    (7, "uploaded_assets", _migration_7_uploaded_assets),
 ]
 
 
@@ -951,6 +964,26 @@ def get_denial_breakdown() -> list:
     """).fetchall()
     db.close()
     return [dict(r) for r in rows]
+
+
+def save_uploaded_asset(asset_id: str, filename: str, content_type: str, content_base64: str, uploaded_by: Optional[str]) -> None:
+    db = get_db()
+    db.execute(
+        "INSERT INTO uploaded_assets (id, filename, content_type, content_base64, uploaded_by) VALUES (?, ?, ?, ?, ?)",
+        (asset_id, filename, content_type, content_base64, uploaded_by),
+    )
+    db.commit()
+    db.close()
+
+
+def get_uploaded_asset(asset_id: str) -> Optional[dict]:
+    db = get_db()
+    row = db.execute(
+        "SELECT id, filename, content_type, content_base64, uploaded_by, created_at FROM uploaded_assets WHERE id=?",
+        (asset_id,),
+    ).fetchone()
+    db.close()
+    return dict(row) if row else None
 
 
 if __name__ == "__main__":
