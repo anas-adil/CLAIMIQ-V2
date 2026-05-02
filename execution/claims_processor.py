@@ -273,26 +273,17 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 parsed_evidence_list=parsed_evidence_list,
             )
             result["steps"]["disposition"] = disposition
+            # Record disposition findings but do NOT return early — let the full
+            # GLM pipeline run so rich adjudication reasoning, fraud analysis,
+            # GP advisory, and EOB are always generated for every claim.
             if disposition.get("finalize_now"):
-                reasons = [f"- {h.get('rule_id')}: {h.get('reason')}" for h in disposition.get("rule_hits", [])]
-                decision = {
-                    "decision": disposition.get("mapped_status", "UNDER_REVIEW"),
-                    "confidence": 1.0,
-                    "reasoning": "Deterministic policy hard-gate triggered.\n" + "\n".join(reasons),
-                    "denial_reason_code": "16" if disposition.get("disposition_class") == "REJECT_INVALID" else "29",
-                    "denial_reason_description": "Rejected due to invalid claim integrity." if disposition.get("disposition_class") == "REJECT_INVALID" else "Denied due to policy/timely filing/eligibility rules.",
-                    "is_auto_adjudicated": 1,
-                    "disposition_class": disposition.get("disposition_class"),
-                    "rule_hits": disposition.get("rule_hits", []),
-                    "policy_version": disposition.get("policy_version"),
-                    "appealable": disposition.get("appealable"),
-                }
-                db.insert_decision(claim_id, decision, run_id=processing_run_id, is_final=1)
-                final_status = disposition.get("mapped_status", "UNDER_REVIEW")
-                db.update_claim(claim_id, status=final_status, lifecycle_stage=final_status, auto_adjudicated=1)
-                result["final_status"] = final_status
-                result["steps"]["adjudication"] = decision
-                return result
+                for h in disposition.get("rule_hits", []):
+                    pipeline_findings.append({
+                        "severity": "CRITICAL",
+                        "source": "DISPOSITION",
+                        "detail": f"{h.get('rule_id')}: {h.get('reason')}",
+                        "carc": h.get("carc", "16"),
+                    })
 
             # Step 4: Clinical Validation
             logger.info(f"[{claim_id}] Step 4: Clinical Validation...")
