@@ -124,7 +124,13 @@ def evaluate_phase1_disposition(
     priority = {"REJECT_INVALID": 4, "DENY_POLICY": 3, "PEND_REVIEW": 2, "APPROVE": 1}
     disposition = "APPROVE"
     if hits:
-        disposition = sorted(hits, key=lambda h: priority.get(h.get("disposition"), 0), reverse=True)[0]["disposition"]
+        # Secondary sort by rule_id ensures deterministic ordering when two rules
+        # share the same priority level (e.g. two DENY_POLICY hits).
+        disposition = sorted(
+            hits,
+            key=lambda h: (priority.get(h.get("disposition"), 0), h.get("rule_id", "")),
+            reverse=True,
+        )[0]["disposition"]
 
     status_map = policy.get("status_map", _DEFAULT_POLICY["status_map"])
     mapped_status = status_map.get(disposition, "UNDER_REVIEW")

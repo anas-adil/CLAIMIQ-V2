@@ -21,8 +21,12 @@ def compute_copay(total_amount_myr: float, icd10_code: str = "", clinic_name: st
     # NOTE: We previously planned to apply a punitive behavioral copay here for MC abusers.
     # However, under the Employment Act 1955, we cannot illegally alter the copay or halt the clinic's payment.
     # The punishment is handled via an HR Alert generated in claims_processor.py.
-    pct = total * 0.05
-    deductible_floor = 500.0
-    copay = min(total, max(pct, min(deductible_floor, total)))
-    return {"copay_myr": round(copay, 2), "rule": "BNM_5PCT_OR_RM500", "is_exempt": False, "reason": "Standard 5% co-payment applied."}
+    # 5% of billed amount, capped at RM 50 floor and RM 500 ceiling.
+    # Formula: copay = clamp(5% of total, RM 5, RM 500)
+    # Old formula `min(total, max(pct, min(500, total)))` evaluated to `total`
+    # for any amount < 500 (i.e. patient always owed the full bill). Fixed below.
+    pct = round(total * 0.05, 2)
+    copay = max(5.0, min(pct, 500.0))
+    copay = min(copay, total)  # never charge more than the bill itself
+    return {"copay_myr": round(copay, 2), "rule": "BNM_5PCT_CAPPED_RM500", "is_exempt": False, "reason": "Standard 5% co-payment (min RM 5, max RM 500) applied."}
 

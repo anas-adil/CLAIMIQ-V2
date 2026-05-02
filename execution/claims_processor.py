@@ -179,7 +179,16 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             db.update_claim(claim_id, cross_ref_result=json.dumps(cross_ref))
             result["steps"]["deterministic_validation"] = cross_ref.get("deterministic_summary", {})
 
-            if cross_ref["verdict"] == "FAIL" and cross_ref.get("critical_count", 0) > 0:
+            # UNABLE_TO_VERIFY means evidence existed but couldn't be parsed — treat as PEND,
+            # not as PASS, so it gets routed for human review rather than silently approved.
+            if cross_ref.get("verdict") == "UNABLE_TO_VERIFY":
+                pipeline_findings.append({
+                    "severity": "WARN",
+                    "source": "CROSS_REFERENCE",
+                    "detail": "Evidence attachments were present but could not be cross-referenced. Manual review required.",
+                })
+
+            if cross_ref.get("verdict") == "FAIL" and cross_ref.get("critical_count", 0) > 0:
                 logger.warning(f"[{claim_id}] CROSS-REFERENCE GATE: {cross_ref['critical_count']} critical contradictions found")
                 
                 fraud_flags = []
@@ -250,7 +259,11 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             visit_date = (claim.get("visit_date", "") if claim else "") or extracted.get("visit_date", "")
             amount = (claim.get("total_amount_myr", 0) if claim else 0) or extracted.get("total_amount_myr", 0)
             eligibility = (
-                eligibility_engine.check_eligibility(ic, visit_date, amount, claim_id=claim_id)
+                eligibility_engine.check_eligibility(
+                    ic, visit_date, amount, claim_id=claim_id,
+                    icd10_code=extracted.get("primary_diagnosis_code") or extracted.get("icd10_code") or "",
+                    clinic_name=extracted.get("clinic_name") or "",
+                )
                 if ic else
                 eligibility_engine.simulate_eligibility_for_unknown(amount)
             )

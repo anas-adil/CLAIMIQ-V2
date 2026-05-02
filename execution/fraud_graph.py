@@ -63,7 +63,7 @@ def analyze_claim_network(claim: dict) -> dict:
     return {
         "graph_risk_multiplier": round(multiplier, 3),
         "provider_centrality": round(centrality, 4),
-        "recent_repeat_count": int(max(0, recent_repeat_count - 1)),
+        "recent_repeat_count": int(max(0, recent_repeat_count)),
         "graph_nodes": g.number_of_nodes(),
         "graph_edges": g.number_of_edges(),
         "focus_provider": provider,

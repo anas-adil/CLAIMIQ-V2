@@ -32,6 +32,13 @@ def _norm_name(v: Any) -> str:
 
 
 def _name_similarity(a: str, b: str) -> float:
+    """Token-overlap similarity for Malaysian names.
+
+    Uses the SHORTER name as the denominator so that a submitted name of
+    "Siti Nurhaliza" still matches a lab report listing the full
+    "Siti Nurhaliza binti Mohd" (2/2 = 1.0) rather than scoring 2/4 = 0.5
+    which the old max-denominator formula produced.
+    """
     if not a or not b:
         return 0.0
     ta = set(a.split())
@@ -39,7 +46,9 @@ def _name_similarity(a: str, b: str) -> float:
     if not ta or not tb:
         return 0.0
     overlap = len(ta.intersection(tb))
-    denom = max(len(ta), len(tb))
+    # Use the shorter token set as denominator — a short name is a valid
+    # abbreviated form of a longer one (e.g. "Siti Nurhaliza" ⊂ full name).
+    denom = min(len(ta), len(tb))
     return overlap / float(denom)
 
 
@@ -148,7 +157,7 @@ def evaluate_claim_consistency(
 
         if ev_name and sub_name:
             sim = _name_similarity(ev_name, sub_name)
-            if sim < 0.5:
+            if sim < 0.4:  # raised from 0.5 — short-name abbreviations score 1.0 with new denominator
                 findings.append({
                     "severity": "CRITICAL",
                     "type": "IDENTITY_MISMATCH",

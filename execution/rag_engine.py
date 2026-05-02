@@ -130,7 +130,17 @@ def get_policy_context(claim_data: dict, top_k: int = 5) -> str:
 
     results = search(query, top_k=top_k)
     if not results:
-        return "No policy documents available. Apply general medical insurance principles."
+        return (
+            "No matching policy documents found for this claim. "
+            "Apply the following general Malaysian TPA principles:\n"
+            "- PMCare outpatient GP consultation limit: RM 35–80 per visit\n"
+            "- Medications: covered up to RM 50 per visit for generic formulary drugs\n"
+            "- Lab investigations: covered if clinically indicated with documented diagnosis\n"
+            "- Inpatient: pre-authorisation required for admissions > 24h\n"
+            "- Timely filing: claims must be submitted within 14 days of service date\n"
+            "- Duplicate claims: not payable (CARC 18)\n"
+            "- Non-covered: cosmetic procedures, experimental treatments, self-inflicted injuries"
+        )
 
     context_parts = []
     for i, doc in enumerate(results, 1):

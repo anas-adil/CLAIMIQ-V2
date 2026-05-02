@@ -122,19 +122,26 @@ def _call_glm(
             if response.usage and response.usage.total_tokens:
                 _TOKEN_METRICS["total_tokens"] += int(response.usage.total_tokens)
                 _TOKEN_METRICS["calls"] += 1
+                # Log token usage in a separate try/finally so a DB error never
+                # crashes the caller and the connection is always released.
+                _conn = None
                 try:
-                    import database as db
-                    conn = db.get_db()
+                    import database as _db_mod
+                    _conn = _db_mod.get_db()
                     cost = (response.usage.total_tokens / 1000) * 0.00006
-                    conn.execute(
+                    _conn.execute(
                         "INSERT INTO token_usage (id, claim_id, prompt_tokens, completion_tokens, total_tokens, cost_myr) "
                         "VALUES (?, ?, ?, ?, ?, ?)",
-                        (os.urandom(16).hex(), claim_id, response.usage.prompt_tokens, response.usage.completion_tokens, response.usage.total_tokens, cost)
+                        (os.urandom(16).hex(), claim_id,
+                         response.usage.prompt_tokens, response.usage.completion_tokens,
+                         response.usage.total_tokens, cost)
                     )
-                    conn.commit()
-                    conn.close()
+                    _conn.commit()
                 except Exception as db_e:
                     logger.error(f"Failed to log token usage to DB: {db_e}")
+                finally:
+                    if _conn:
+                        _conn.close()
             
             # Robust JSON cleaning
             if json_mode and content:
@@ -149,22 +156,25 @@ def _call_glm(
                 
             return content
         except Exception as e:
-            err = str(e)
-            logger.warning(f"GLM call failed (attempt {attempt+1}): {err}")
+            raw_err = str(e)
+            # Redact the API key from error messages before logging — keys can
+            # appear in HTTP error bodies or exception repr strings.
+            err = raw_err.replace(api_key, "***REDACTED***") if api_key else raw_err
+            logger.warning(f"GLM call failed (attempt {attempt+1}): {err[:400]}")
             if "401" in err or "token expired" in err.lower() or "incorrect" in err.lower():
                 _AUTH_FAILURE_UNTIL = time.time() + max(auth_cooldown_seconds, 60)
-                _AUTH_FAILURE_REASON = err
+                _AUTH_FAILURE_REASON = "Auth failure (details redacted)"
                 logger.error(
                     "Detected GLM auth failure. Activating fallback-only mode "
                     f"for {int(_AUTH_FAILURE_UNTIL - time.time())}s."
                 )
                 if is_prod:
-                    raise GLMServiceUnavailable(f"SERVICE_UNAVAILABLE: GLM authentication failed: {err}")
+                    raise GLMServiceUnavailable("SERVICE_UNAVAILABLE: GLM authentication failed")
                 return _get_intelligent_mock(system_prompt, user_prompt)
             if attempt == retries - 1:
-                logger.error("All GLM retries failed. Using intelligent fallback mock for hackathon demo.")
+                logger.error("All GLM retries exhausted.")
                 if is_prod:
-                    raise GLMServiceUnavailable(f"SERVICE_UNAVAILABLE: All GLM retries failed: {err}")
+                    raise GLMServiceUnavailable(f"SERVICE_UNAVAILABLE: All GLM retries failed: {err[:200]}")
                 return _get_intelligent_mock(system_prompt, user_prompt)
             time.sleep(2 ** attempt)
     

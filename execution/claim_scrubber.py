@@ -96,12 +96,14 @@ def scrub_claim(claim_data: dict, claim_id: int = None) -> dict:
         except ValueError:
             errors.append({"check": "INVALID_DATE", "message": f"Invalid visit_date format: {visit_date_str}", "carc": "16"})
 
-    # 4. Duplicate detection — warn only, do not hard-deny (GP may resubmit legitimately)
+    # 4. Duplicate detection — hard FAIL with CARC 18. An exact duplicate (same IC +
+    # visit date + diagnosis) is a billing error or fraud attempt and must not proceed
+    # to adjudication. The clinic can resubmit with a corrected claim if it was legitimate.
     if claim_data.get("patient_ic") and visit_date_str and claim_data.get("diagnosis"):
         if _is_duplicate(claim_data, claim_id):
-            warnings.append({
-                "check": "POSSIBLE_DUPLICATE",
-                "message": "A similar claim was previously submitted for the same patient/date/diagnosis. Review carefully.",
+            errors.append({
+                "check": "DUPLICATE_CLAIM",
+                "message": "A claim for the same patient, visit date, and diagnosis already exists. CARC 18: Exact duplicate of a prior submission.",
                 "carc": "18",
             })
 

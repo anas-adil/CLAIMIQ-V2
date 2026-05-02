@@ -21,11 +21,14 @@ def predict_denial(claim: dict, clinic_fraud_history_count: int = 0) -> dict:
     amount_ratio = (total / benchmark) if benchmark > 0 else 1.0
 
     try:
-        visit = date.fromisoformat(claim.get("visit_date"))
-        filing = date.fromisoformat(claim.get("filing_date")) if claim.get("filing_date") else date.today()
+        visit = date.fromisoformat(str(claim.get("visit_date") or "").strip())
+        filing_str = str(claim.get("filing_date") or "").strip()
+        filing = date.fromisoformat(filing_str) if filing_str else date.today()
         filing_days = max(0, (filing - visit).days)
     except Exception:
-        filing_days = 7
+        # Unknown filing gap — assume neutral (0 days) so a date parse failure
+        # does not artificially inflate or suppress the denial score.
+        filing_days = 0
 
     evidence_attached = 1 if claim.get("_evidence_attached") or claim.get("_parsed_evidence") else 0
     icd_risk_tier = 2 if icd.startswith("C") else (1 if icd in ("J18.9", "A90") else 0)

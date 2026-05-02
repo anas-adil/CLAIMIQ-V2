@@ -39,7 +39,7 @@ def ensure_members_seeded():
     logger.info(f"Synchronized {len(SYNTHETIC_MEMBERS)} synthetic members to database")
 
 
-def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float = 0, claim_id: int = None) -> dict:
+def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float = 0, claim_id: int = None, icd10_code: str = "", clinic_name: str = "") -> dict:
     """
     Verify member eligibility for a claim.
     Returns structured eligibility result.
@@ -81,10 +81,18 @@ def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float =
         start = date.fromisoformat(member["coverage_start_date"])
         end = date.fromisoformat(member["coverage_end_date"])
         visit_date = date.fromisoformat(visit_date_str) if visit_date_str else today
-    except (ValueError, TypeError):
-        visit_date = today
-        start = today
-        end = today
+    except (ValueError, TypeError) as date_err:
+        # Bad dates must not silently make a claim appear eligible.
+        # Log the error and return ineligible so a human reviews it.
+        logger.error(f"Date parsing failed for IC {ic_number}: {date_err}")
+        return {
+            "eligible": False,
+            "reason": "INVALID_DATE_FORMAT",
+            "carc_code": "16",
+            "message": f"Coverage or visit date could not be parsed: {date_err}",
+            "member": dict(member),
+            "patient_responsibility_myr": total_amount,
+        }
 
     if not member["is_active"]:
         return {"eligible": False, "reason": "COVERAGE_INACTIVE", "carc_code": "27",
@@ -104,8 +112,9 @@ def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float =
                 "message": f"Annual outpatient limit of RM {limit:.2f} has been fully utilised",
                 "member": dict(member), "patient_responsibility_myr": total_amount}
 
-    # Calculate patient responsibility
-    copay_calc = copay_engine.compute_copay(total_amount, member.get("icd10_code"), member.get("clinic_name"))
+    # Calculate patient responsibility — pass claim-level icd/clinic so
+    # exemption logic (trauma codes S/T/C, government facilities) fires correctly.
+    copay_calc = copay_engine.compute_copay(total_amount, icd10_code or "", clinic_name or "")
     copay = copay_calc["copay_myr"] if copay_calc else (member["copay_myr"] or 10)
     max_visit = member["max_per_visit_myr"] or 200
     covered = max(0.0, min(total_amount, max_visit, limit - used))

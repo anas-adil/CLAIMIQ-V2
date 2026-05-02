@@ -262,10 +262,23 @@ _SCHEMA_INITIALIZED = False
 
 
 def _ensure_demo_users(conn: sqlite3.Connection):
+    """Seed demo users only in non-production environments.
+    In production, demo credentials must be provisioned via DEMO_ADMIN_PASSWORD env var
+    or through the admin API — never hardcoded defaults."""
+    import os
+    app_env = (os.getenv("APP_ENV") or os.getenv("ENV") or "dev").lower()
+    is_prod = app_env in ("prod", "production")
+
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchall()
     if not rows:
         return
-    pwd_hash = hashlib.sha256(b"Demo@123").hexdigest()
+
+    # In production, only seed if an explicit override password is provided.
+    raw_password = os.getenv("DEMO_ADMIN_PASSWORD") if is_prod else "Demo@123"
+    if not raw_password:
+        return  # Production with no override — do not seed demo accounts.
+
+    pwd_hash = hashlib.sha256(raw_password.encode()).hexdigest()
     demo_users = [
         ("usr-admin", "admin@demo.my", "System Admin", "SYSTEM_ADMIN", "SYSTEM", None, None),
         ("usr-clinic", "clinic@demo.my", "Clinic User", "CLINIC_USER", "CLINIC", "CLINIC-ALPHA", None),
@@ -570,7 +583,22 @@ def insert_claim(raw_text: str, extracted: Optional[dict] = None) -> int:
     return claim_id
 
 
+_CLAIM_UPDATABLE_COLUMNS = frozenset({
+    "status", "lifecycle_stage", "raw_text", "patient_name", "patient_ic",
+    "clinic_name", "clinic_id", "visit_date", "diagnosis", "diagnosis_codes",
+    "total_amount_myr", "extracted_data", "coded_data", "icd10_code",
+    "scrub_result", "eligibility_result", "parsed_evidence", "cross_ref_result",
+    "evidence_doc_type", "evidence_quality", "fraud_flagged", "auto_adjudicated",
+    "cycle_time_hours", "ar_days", "clean_claim_flag", "processing_lock",
+    "line_items", "patient_mc_risk_score", "clinic_mc_risk_score",
+    "is_mc_issued", "mc_days",
+})
+
 def update_claim(claim_id: int, **kwargs):
+    # Guard against column-injection via unknown kwarg keys.
+    invalid = set(kwargs) - _CLAIM_UPDATABLE_COLUMNS
+    if invalid:
+        raise ValueError(f"update_claim: disallowed column(s): {invalid}")
     db = get_db()
     old = db.execute("SELECT status FROM claims WHERE id=?", (claim_id,)).fetchone()
     old_status = old["status"] if old else None

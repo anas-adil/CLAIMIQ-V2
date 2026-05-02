@@ -22,7 +22,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("claimiq.api")
 
 app = FastAPI(title="ClaimIQ MVP API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+_RAW_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
+_ALLOWED_ORIGINS = [o.strip() for o in _RAW_ORIGINS.split(",") if o.strip()] if _RAW_ORIGINS else ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+)
 
 # --- Models ---
 class LoginRequest(BaseModel):
@@ -426,22 +435,26 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
 @app.post("/api/claims/{claim_id}/rai")
 async def raise_rai(claim_id: int, body: RAIRequest, user: dict = Depends(require_role(["TPA_PROCESSOR"]))):
     conn = db.get_db()
-    conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
-                 (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_REQUEST", body.request_note))
-    conn.execute("UPDATE claims SET status='PENDING_RAI' WHERE id=?", (claim_id,))
-    db.log_audit(conn, claim_id=claim_id, action="RAI_REQUESTED", user_id=user["user_id"], to_status="PENDING_RAI")
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
+                     (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_REQUEST", body.request_note))
+        conn.execute("UPDATE claims SET status='PENDING_RAI', updated_at=datetime('now') WHERE id=?", (claim_id,))
+        db.log_audit(conn, claim_id=claim_id, action="RAI_REQUESTED", user_id=user["user_id"], to_status="PENDING_RAI")
+        conn.commit()
+    finally:
+        conn.close()
     return {"status": "PENDING_RAI"}
 
 @app.post("/api/claims/{claim_id}/rai-response")
 async def respond_rai(claim_id: int, body: RAIResponse, user: dict = Depends(require_role(["CLINIC_USER"]))):
     conn = db.get_db()
-    conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
-                 (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_RESPONSE", body.response_note))
-    conn.execute("UPDATE claims SET status='UNDER_REVIEW' WHERE id=?", (claim_id,))
-    db.log_audit(conn, claim_id=claim_id, action="RAI_RESPONDED", user_id=user["user_id"], to_status="UNDER_REVIEW")
-    conn.commit()
+    try:
+        conn.execute("INSERT INTO action_notes (id, claim_id, user_id, action_type, note_text) VALUES (?, ?, ?, ?, ?)",
+                     (os.urandom(16).hex(), claim_id, user["user_id"], "RAI_RESPONSE", body.response_note))
+        conn.execute("UPDATE claims SET status='UNDER_REVIEW', updated_at=datetime('now') WHERE id=?", (claim_id,))
+        db.log_audit(conn, claim_id=claim_id, action="RAI_RESPONDED", user_id=user["user_id"], to_status="UNDER_REVIEW")
+        conn.commit()
+    finally:
     conn.close()
     return {"status": "UNDER_REVIEW"}
 
