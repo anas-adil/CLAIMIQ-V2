@@ -13,6 +13,7 @@ import json
 import logging
 import time
 import base64
+import re
 import requests
 from dotenv import load_dotenv
 
@@ -99,12 +100,31 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     
     genai.configure(api_key=gemini_key.strip())
 
+    model_candidates = []
+    configured_model = (os.getenv("GEMINI_MODEL") or "").strip()
+    if configured_model:
+        model_candidates.append(configured_model)
+    model_candidates.extend(["gemini-2.5-flash", "gemini-1.5-flash"])
+    # preserve order while removing duplicates
+    seen = set()
+    model_candidates = [m for m in model_candidates if not (m in seen or seen.add(m))]
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info(f"Gemini [{doc_type}] attempt {attempt}/{MAX_RETRIES}")
             t0 = time.time()
-            
-            model = genai.GenerativeModel('gemini-2.5-flash')
+
+            model = None
+            last_model_error = None
+            for model_name in model_candidates:
+                try:
+                    model = genai.GenerativeModel(model_name)
+                    break
+                except Exception as me:
+                    last_model_error = me
+            if model is None:
+                raise RuntimeError(f"No Gemini model available: {last_model_error}")
+
             image_data = base64.b64decode(image_b64)
             image = Image.open(BytesIO(image_data))
             
@@ -124,7 +144,14 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
                     text = text[4:]
                 text = text.rstrip("`").strip()
 
-            parsed = json.loads(text)
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                # Try to recover a JSON object embedded in extra text.
+                m = re.search(r"\{[\s\S]*\}", text)
+                if not m:
+                    raise
+                parsed = json.loads(m.group(0))
             parsed["_source"] = "GEMINI_LIVE"
             parsed["_doc_type"] = doc_type
             parsed["_elapsed_sec"] = round(elapsed, 1)

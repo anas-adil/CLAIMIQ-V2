@@ -32,15 +32,23 @@ def parse_evidence(image_b64: str) -> dict:
         
     logger.info(f"Routing to MedGemma parser for {doc_type}...")
     
-    if doc_type == "XRAY":
-        parsed = medgemma_client.analyze_xray(image_b64)
-    elif doc_type == "LAB_REPORT":
-        parsed = medgemma_client.analyze_lab_report(image_b64)
-    elif doc_type == "INVOICE":
-        parsed = medgemma_client.analyze_invoice(image_b64)
-    else: # UNKNOWN
-        logger.warning("Document type UNKNOWN, attempting fallback lab report parsing...")
-        parsed = medgemma_client.analyze_lab_report(image_b64)
+    analyzer_order = {
+        "XRAY": [medgemma_client.analyze_xray, medgemma_client.analyze_lab_report, medgemma_client.analyze_invoice],
+        "LAB_REPORT": [medgemma_client.analyze_lab_report, medgemma_client.analyze_invoice, medgemma_client.analyze_xray],
+        "INVOICE": [medgemma_client.analyze_invoice, medgemma_client.analyze_lab_report, medgemma_client.analyze_xray],
+        "UNKNOWN": [medgemma_client.analyze_lab_report, medgemma_client.analyze_invoice, medgemma_client.analyze_xray],
+    }
+    parsed = None
+    last_error = None
+    for analyzer in analyzer_order.get(doc_type, analyzer_order["UNKNOWN"]):
+        candidate = analyzer(image_b64)
+        if "error" not in candidate:
+            parsed = candidate
+            break
+        last_error = candidate.get("error")
+        logger.warning(f"Evidence parser fallback attempt failed: {last_error}")
+    if parsed is None:
+        parsed = {"error": last_error or "parse_failed"}
         
     if "error" in parsed:
         logger.error(f"Evidence parsing failed: {parsed['error']}")
@@ -52,7 +60,7 @@ def parse_evidence(image_b64: str) -> dict:
         }
         
     confidence_key = "confidence" if doc_type == "XRAY" else "extraction_confidence"
-    conf = parsed.get(confidence_key, 0.0)
+    conf = parsed.get(confidence_key, parsed.get("confidence", 0.0))
     
     return {
         "triage": triage,
