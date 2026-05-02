@@ -12,8 +12,9 @@ logger = logging.getLogger("claimiq.xref")
 def _normalize_name(name: str) -> str:
     if not name: return ""
     name = name.upper()
-    name = re.sub(r'\b(BIN|BINTI|A/L|A/P)\b', '', name)
-    return re.sub(r'[^A-Z]', '', name)
+    name = re.sub(r'\b(BIN|BINTI|A/L|A/P)\b', ' ', name)
+    name = re.sub(r'[^A-Z ]', ' ', name)
+    return re.sub(r'\s+', ' ', name).strip()
 
 def check_identity_match(parsed_name: str, submitted_name: str) -> dict:
     if not parsed_name or not submitted_name:

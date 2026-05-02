@@ -43,8 +43,10 @@ PROMPT_LAB = (
     "You are a medical data extraction assistant. "
     "Extract ALL laboratory test results from this lab report image. "
     "Output ONLY valid JSON (no markdown, no code blocks):\n"
-    '{"patient_name_on_report": "<name or null>", '
-    '"report_date": "<date or null>", '
+    '{"patient_name_on_report": "<full name exactly as printed, or null>", '
+    '"ic_number_on_report": "<IC/NRIC/passport number exactly as printed, or null>", '
+    '"registered_date": "<registered or collected date or null>", '
+    '"report_date": "<reported/printed date or null>", '
     '"facility": "<lab/clinic name or null>", '
     '"results": [{"test": "<test name>", "value": <numeric value>, '
     '"flag": "<L, H, or null>", "unit": "<unit>", "ref_range": "<low-high>"}], '
@@ -56,7 +58,8 @@ PROMPT_INVOICE = (
     "Extract ALL line items and totals from this medical invoice image. "
     "Output ONLY valid JSON (no markdown, no code blocks):\n"
     '{"facility": "<name or null>", "invoice_date": "<date or null>", '
-    '"patient_name_on_invoice": "<name or null>", '
+    '"patient_name_on_invoice": "<full name exactly as printed, or null>", '
+    '"ic_number_on_invoice": "<IC/NRIC/passport number exactly as printed, or null>", '
     '"items": [{"description": "<item>", "quantity": <num>, '
     '"unit_price": <num>, "total": <num>}], '
     '"grand_total": <total amount as number>, '
