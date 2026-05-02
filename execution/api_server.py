@@ -293,11 +293,53 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
     actions = conn.execute("SELECT * FROM action_notes WHERE claim_id=? ORDER BY created_at ASC", (claim_id,)).fetchall()
     res["action_history"] = [dict(a) for a in actions]
 
+    # --- Helper to safely parse JSON strings from SQLite columns ---
+    def _safe_json_parse(value, default=None):
+        if value is None or value == "":
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            parsed = json.loads(value)
+            return parsed if parsed is not None else default
+        except (TypeError, json.JSONDecodeError):
+            return default
+
     decision = conn.execute("SELECT * FROM decisions WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
-    res["decision"] = dict(decision) if decision else None
+    if decision:
+        dec_dict = dict(decision)
+        # Parse JSON string columns
+        dec_dict["policy_references"] = _safe_json_parse(dec_dict.get("policy_references"), [])
+        dec_dict["conditions"] = _safe_json_parse(dec_dict.get("conditions"), [])
+        # Merge full_result keys into the top-level decision dict so the frontend
+        # can access fields like _ai_decision, reasoning_citations, denial_prediction,
+        # disposition_class, rule_hits, etc. without digging into full_result.
+        full_result = _safe_json_parse(dec_dict.get("full_result"), {})
+        if isinstance(full_result, dict):
+            for key, value in full_result.items():
+                if key not in dec_dict or dec_dict[key] is None:
+                    dec_dict[key] = value
+        # Remove the raw full_result string to avoid sending duplicate data
+        dec_dict.pop("full_result", None)
+        res["decision"] = dec_dict
+    else:
+        res["decision"] = None
 
     fraud = conn.execute("SELECT * FROM fraud_scores WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
-    res["fraud"] = dict(fraud) if fraud else None
+    if fraud:
+        fraud_dict = dict(fraud)
+        # Parse flags from JSON string to array
+        fraud_dict["flags"] = _safe_json_parse(fraud_dict.get("flags"), [])
+        # Merge full_result keys (e.g. graph_signal, fraud_risk_score alias)
+        fraud_full = _safe_json_parse(fraud_dict.get("full_result"), {})
+        if isinstance(fraud_full, dict):
+            for key, value in fraud_full.items():
+                if key not in fraud_dict or fraud_dict[key] is None:
+                    fraud_dict[key] = value
+        fraud_dict.pop("full_result", None)
+        res["fraud"] = fraud_dict
+    else:
+        res["fraud"] = None
 
     token_usage = conn.execute(
         "SELECT COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
@@ -316,7 +358,18 @@ async def get_claim_detail(claim_id: int, user: dict = Depends(get_current_user)
 
     # advisory — needed by the GP Advisory card in the claim modal
     advisory = conn.execute("SELECT * FROM advisories WHERE claim_id=? ORDER BY id DESC LIMIT 1", (claim_id,)).fetchone()
-    res["advisory"] = dict(advisory) if advisory else None
+    if advisory:
+        adv_dict = dict(advisory)
+        adv_dict["action_items"] = _safe_json_parse(adv_dict.get("action_items"), [])
+        adv_full = _safe_json_parse(adv_dict.get("full_result"), {})
+        if isinstance(adv_full, dict):
+            for key, value in adv_full.items():
+                if key not in adv_dict or adv_dict[key] is None:
+                    adv_dict[key] = value
+        adv_dict.pop("full_result", None)
+        res["advisory"] = adv_dict
+    else:
+        res["advisory"] = None
 
     # eob — needed by the EOB card in the claim modal
     eob = conn.execute("SELECT * FROM eobs WHERE claim_id=? ORDER BY generated_at DESC LIMIT 1", (claim_id,)).fetchone()
