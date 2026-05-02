@@ -81,7 +81,7 @@ def evaluate_phase1_disposition(
         })
 
     # Rule: timely filing.
-    visit_dt = _parse_date(extracted.get("visit_date") or claim_record.get("visit_date"))
+    visit_dt = _parse_date((claim_record or {}).get("visit_date") or extracted.get("visit_date"))
     filing_dt = _parse_date(claim_record.get("filing_date") or claim_record.get("created_at"))
     if visit_dt and filing_dt:
         delta = (filing_dt.date() - visit_dt.date()).days
@@ -134,4 +134,3 @@ def evaluate_phase1_disposition(
         "rule_hits": hits,
         "finalize_now": disposition in ("REJECT_INVALID", "DENY_POLICY", "PEND_REVIEW") and len(hits) > 0,
     }
-

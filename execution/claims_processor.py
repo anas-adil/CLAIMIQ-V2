@@ -72,7 +72,15 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                 try:
                     initial_data = json.loads(initial_data_str) if isinstance(initial_data_str, str) else initial_data_str
                     # Priority fields from submission override LLM extraction
-                    for key in ["patient_name", "patient_ic", "clinic_name", "_vision_analysis", "_vision_source"]:
+                    for key in [
+                        "patient_name",
+                        "patient_ic",
+                        "clinic_name",
+                        "visit_date",
+                        "total_amount_myr",
+                        "_vision_analysis",
+                        "_vision_source",
+                    ]:
                         if initial_data.get(key):
                             extracted[key] = initial_data[key]
                 except (json.JSONDecodeError, TypeError):
@@ -84,6 +92,11 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                     extracted[key] = initial_data[key]
 
             extracted["raw_text"] = raw_text
+            # Use submitted claim record as source-of-truth for critical fields whenever present.
+            if claim and claim.get("visit_date"):
+                extracted["visit_date"] = claim.get("visit_date")
+            if claim and claim.get("total_amount_myr") is not None:
+                extracted["total_amount_myr"] = claim.get("total_amount_myr")
             try:
                 extracted["total_amount_myr"] = float(extracted.get("total_amount_myr") or 0.0)
             except (TypeError, ValueError):
@@ -224,9 +237,9 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
 
             # Step 2: Eligibility
             logger.info(f"[{claim_id}] Step 2: Checking eligibility...")
-            ic = extracted.get("patient_ic", "")
-            visit_date = extracted.get("visit_date", "")
-            amount = extracted.get("total_amount_myr", 0)
+            ic = extracted.get("patient_ic", "") or (claim.get("patient_ic", "") if claim else "")
+            visit_date = (claim.get("visit_date", "") if claim else "") or extracted.get("visit_date", "")
+            amount = (claim.get("total_amount_myr", 0) if claim else 0) or extracted.get("total_amount_myr", 0)
             eligibility = (
                 eligibility_engine.check_eligibility(ic, visit_date, amount, claim_id=claim_id)
                 if ic else
