@@ -455,7 +455,7 @@ async def respond_rai(claim_id: int, body: RAIResponse, user: dict = Depends(req
         db.log_audit(conn, claim_id=claim_id, action="RAI_RESPONDED", user_id=user["user_id"], to_status="UNDER_REVIEW")
         conn.commit()
     finally:
-    conn.close()
+        conn.close()
     return {"status": "UNDER_REVIEW"}
 
 @app.post("/api/claims/{claim_id}/appeal")
