@@ -297,6 +297,15 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             result["steps"]["coding"] = coded
             result["steps"]["drg"] = drg_mapper.map_icd_to_drg(coded.get("primary_diagnosis_code"))
             full_claim = {**extracted, **coded}
+            # Re-assert authoritative amount — coding response must never override the
+            # submitted total (live LLM sometimes hallucinate 0 for this field).
+            _auth_amount = (
+                float(claim["total_amount_myr"])
+                if claim and claim.get("total_amount_myr") is not None
+                else float(extracted.get("total_amount_myr") or 0)
+            )
+            full_claim["total_amount_myr"] = _auth_amount
+
             if parsed_evidence_list:
                 full_claim["_parsed_evidence"] = parsed_evidence_list
             full_claim["_cross_reference_result"] = cross_ref

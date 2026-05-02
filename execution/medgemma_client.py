@@ -81,9 +81,14 @@ def _post(endpoint: str, payload: dict, timeout: int) -> dict:
     return resp.json()
 
 
+def _is_pdf(raw_bytes: bytes) -> bool:
+    return raw_bytes[:4] == b"%PDF"
+
+
 def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     """
-    Send an image + prompt to Gemini API. Returns structured result dict.
+    Send an image or PDF + prompt to Gemini API. Returns structured result dict.
+    PDFs are passed as inline data (Gemini supports them natively).
     """
     import google.generativeai as genai
     from PIL import Image
@@ -97,7 +102,7 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     if not gemini_key:
         logger.error("Gemini API key missing in .env (tried 'gemini' and 'GEMINI_API_KEY')")
         return {"error": "gemini_api_key_missing", "source": "GEMINI_LIVE"}
-    
+
     genai.configure(api_key=gemini_key.strip())
 
     model_candidates = []
@@ -105,7 +110,6 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     if configured_model:
         model_candidates.append(configured_model)
     model_candidates.extend(["gemini-2.5-flash", "gemini-1.5-flash"])
-    # preserve order while removing duplicates
     seen = set()
     model_candidates = [m for m in model_candidates if not (m in seen or seen.add(m))]
 
@@ -125,10 +129,18 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
             if model is None:
                 raise RuntimeError(f"No Gemini model available: {last_model_error}")
 
-            image_data = base64.b64decode(image_b64)
-            image = Image.open(BytesIO(image_data))
-            
-            response = model.generate_content([prompt, image])
+            raw_bytes = base64.b64decode(image_b64)
+
+            # Route PDFs as inline data parts (Gemini supports PDF natively);
+            # route images through PIL as before.
+            if _is_pdf(raw_bytes):
+                logger.info(f"Gemini [{doc_type}]: detected PDF, sending as application/pdf inline part")
+                import google.generativeai.types as genai_types
+                pdf_part = {"mime_type": "application/pdf", "data": raw_bytes}
+                response = model.generate_content([pdf_part, prompt])
+            else:
+                image = Image.open(BytesIO(raw_bytes))
+                response = model.generate_content([prompt, image])
             elapsed = time.time() - t0
             logger.info(f"Gemini responded in {elapsed:.1f}s")
 

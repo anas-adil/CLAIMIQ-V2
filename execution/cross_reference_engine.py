@@ -84,7 +84,7 @@ def check_lab_vs_description(parsed_results: list, doctor_description: str) -> l
             "lab_keywords": ["platelet", "plt"],
             "doc_keywords": ["platelet", "plt"],
             "field": "Platelets",
-            "normalize_thousands": True,  # handle 15 vs 15000 mismatch
+            "normalize_thousands": True,
         },
         {
             "lab_keywords": ["hematocrit", "hct"],
@@ -109,6 +109,31 @@ def check_lab_vs_description(parsed_results: list, doctor_description: str) -> l
             "doc_keywords": ["wbc", "white blood cell", "white cell"],
             "field": "WBC",
             "normalize_thousands": True,
+        },
+        # Occupational / toxicology panels
+        {
+            "lab_keywords": ["o-cresol", "cresol"],
+            "doc_keywords": ["o-cresol", "cresol"],
+            "field": "o-Cresol",
+            "normalize_thousands": False,
+        },
+        {
+            "lab_keywords": ["phenol"],
+            "doc_keywords": ["phenol"],
+            "field": "Phenol",
+            "normalize_thousands": False,
+        },
+        {
+            "lab_keywords": ["benzene"],
+            "doc_keywords": ["benzene"],
+            "field": "Benzene",
+            "normalize_thousands": False,
+        },
+        {
+            "lab_keywords": ["toluene"],
+            "doc_keywords": ["toluene"],
+            "field": "Toluene",
+            "normalize_thousands": False,
         },
     ]
     
@@ -229,7 +254,46 @@ def cross_reference_all(parsed_evidence_list: list, claim_data: dict, raw_text: 
                     "note": id_check["note"]
                 })
     
-    # 2. GLM AI Alignment Check
+    # 2a. Deterministic lab-value vs doctor-notes comparison (catches explicit value mismatches
+    #     e.g. doctor writes "o-Cresol < 0.50 mg/L" but lab shows 5.0 mg/L ELEVATED).
+    for parsed_evidence in parsed_evidence_list:
+        if not parsed_evidence or parsed_evidence.get("source") in ["NO_EVIDENCE", "PARSE_FAILED"]:
+            continue
+        triage = parsed_evidence.get("triage", {})
+        parsed_data = parsed_evidence.get("parsed_evidence", {})
+        if triage.get("doc_type") == "LAB_REPORT":
+            lab_results = parsed_data.get("results", [])
+            lab_checks = check_lab_vs_description(lab_results, raw_text)
+            checks.extend(lab_checks)
+
+            # 2b. ELEVATED-flag detector: if ANY result is flagged H/ELEVATED/HIGH but
+            #     the doctor's notes claim "normal", "within limits", or "below limits".
+            doc_lower = (raw_text or "").lower()
+            doctor_claims_normal = any(
+                phrase in doc_lower
+                for phrase in ("normal", "within limit", "below limit", "within range", "no evidence")
+            )
+            if doctor_claims_normal:
+                for res in lab_results:
+                    flag = str(res.get("flag") or "").upper()
+                    test_name = res.get("test") or "Unknown test"
+                    lab_val = res.get("value")
+                    ref_range = res.get("ref_range") or res.get("reporting_limit") or "N/A"
+                    if flag in ("H", "ELEVATED", "HIGH", "ABOVE"):
+                        checks.append({
+                            "check": "elevated_vs_normal_claim",
+                            "result": "CRITICAL_CONTRADICTION",
+                            "field": test_name,
+                            "doctor_says": "normal / within limits",
+                            "lab_shows": f"{lab_val} (ELEVATED, limit {ref_range})",
+                            "note": (
+                                f"⚠️ CRITICAL: Doctor's notes state results are normal/below limits, "
+                                f"but lab report shows {test_name} = {lab_val} flagged as ELEVATED "
+                                f"(reporting limit: {ref_range}). This is a direct contradiction."
+                            ),
+                        })
+
+    # 3. GLM AI Alignment Check
     try:
         glm_align = glm_client.cross_reference_evidence(parsed_evidence_list, raw_text)
         
@@ -245,7 +309,7 @@ def cross_reference_all(parsed_evidence_list: list, claim_data: dict, raw_text: 
     except Exception as e:
         logger.error(f"GLM Alignment check failed: {e}")
         
-    # 3. GLM Invoice Validation
+    # 4. GLM Invoice Validation
     invoice_list = [ev.get("parsed_evidence", {}) for ev in parsed_evidence_list if ev.get("triage", {}).get("doc_type") == "INVOICE"]
     for inv in invoice_list:
         try:
