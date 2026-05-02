@@ -761,21 +761,32 @@ async function submitClaim() {
     };
 
     try {
-        let evidenceUploadId = null;
+        // Read files as base64 data URLs inline — embed directly in the submit payload.
+        // Avoids broken two-step upload→ID-reference pattern: Vercel serverless gives
+        // each request a fresh ephemeral SQLite, so get_uploaded_asset() always returns
+        // None and images never reach the processor.
+        const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = e => resolve(e.target.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+        });
+
+        let evidenceBase64 = null;
         if (fileEvidence) {
-            btnSubmit.innerHTML = "Uploading evidence...";
-            evidenceUploadId = await uploadSupportingFile(fileEvidence);
+            btnSubmit.innerHTML = "Reading evidence document...";
+            evidenceBase64 = await readFileAsDataUrl(fileEvidence);
         }
 
-        let invoiceUploadId = null;
+        let invoiceBase64 = null;
         if (fileBill) {
-            btnSubmit.innerHTML = "Uploading invoice...";
-            invoiceUploadId = await uploadSupportingFile(fileBill);
+            btnSubmit.innerHTML = "Reading invoice document...";
+            invoiceBase64 = await readFileAsDataUrl(fileBill);
         }
 
         if (fileBill || fileEvidence) {
             btnSubmit.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> Parsing Documents...`;
-            await new Promise(r => setTimeout(r, 1200));
+            await new Promise(r => setTimeout(r, 800));
         }
         btnSubmit.innerHTML = "Initializing Claim...";
 
@@ -820,10 +831,10 @@ async function submitClaim() {
             raw_text: notes,
             bill_attached: !!fileBill,
             evidence_attached: !!fileEvidence,
-            evidence_base64: null,
-            invoice_base64: null,
-            evidence_upload_id: evidenceUploadId,
-            invoice_upload_id: invoiceUploadId,
+            evidence_base64: evidenceBase64,
+            invoice_base64: invoiceBase64,
+            evidence_upload_id: null,
+            invoice_upload_id: null,
             patient_name: patientName,
             patient_ic: patientIc,
             clinic_name: clinicName,
