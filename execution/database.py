@@ -24,14 +24,17 @@ load_dotenv()
 logger = logging.getLogger("claimiq.db")
 
 # Serverless runtimes (Vercel/AWS Lambda) have writable temp space at /tmp.
-# Prefer /tmp there; use local .tmp path in normal dev unless DB_PATH is set.
-if os.getenv("DB_PATH"):
-    DB_PATH = os.getenv("DB_PATH")
-elif os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT"):
+if os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT"):
     DB_PATH = "/tmp/claimiq.db"
+elif os.getenv("DB_PATH"):
+    DB_PATH = os.getenv("DB_PATH")
 else:
     DB_PATH = ".tmp/claimiq.db"
-os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    
+if DB_PATH.startswith("/tmp"):
+    os.makedirs("/tmp", exist_ok=True)
+else:
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
 
 # 10-state lifecycle (matches real TPA workflow)
 CLAIM_STATES = [
