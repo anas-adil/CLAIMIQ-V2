@@ -403,11 +403,66 @@ async def chat_with_claim(claim_id: int, body: ChatRequest, user: dict = Depends
     conn.close()
     
     claim_dict = dict(claim)
+
+    def _safe_json(value, default):
+        if value is None or value == "":
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            parsed = json.loads(value)
+            return parsed if parsed is not None else default
+        except (TypeError, json.JSONDecodeError):
+            return default
+
+    extracted_data = _safe_json(claim_dict.get("extracted_data"), {})
+    parsed_evidence = _safe_json(claim_dict.get("parsed_evidence"), [])
+    cross_ref_result = _safe_json(claim_dict.get("cross_ref_result"), {})
+    diagnosis = claim_dict.get("diagnosis") or extracted_data.get("diagnosis")
+
+    invoice_summary = None
+    if isinstance(parsed_evidence, list):
+        for ev in parsed_evidence:
+            if not isinstance(ev, dict):
+                continue
+            triage = ev.get("triage") or {}
+            if (triage.get("doc_type") or "").upper() != "INVOICE":
+                continue
+            parsed_inv = ev.get("parsed_evidence") or {}
+            if not isinstance(parsed_inv, dict):
+                continue
+            item_keys = ["line_items", "items", "invoice_items"]
+            line_items = []
+            for k in item_keys:
+                if isinstance(parsed_inv.get(k), list):
+                    line_items = parsed_inv.get(k)
+                    break
+            inv_total = (
+                parsed_inv.get("total_amount")
+                or parsed_inv.get("invoice_total")
+                or parsed_inv.get("total")
+            )
+            summary_parts = []
+            if inv_total not in (None, ""):
+                summary_parts.append(f"total billed RM {inv_total}")
+            if line_items:
+                summary_parts.append(f"{len(line_items)} line item(s)")
+            invoice_summary = "; ".join(summary_parts) if summary_parts else "invoice was parsed but no totals/line items were confidently extracted"
+            break
+
     context = {
         "claim_id": claim_id,
         "status": claim_dict.get("status"),
-        "diagnosis": claim_dict.get("diagnosis"),
+        "diagnosis": diagnosis,
+        "icd10_code": claim_dict.get("icd10_code") or extracted_data.get("icd10_code") or extracted_data.get("primary_diagnosis_code"),
         "total_amount_myr": claim_dict.get("total_amount_myr"),
+        "patient_name": claim_dict.get("patient_name") or extracted_data.get("patient_name"),
+        "clinic_name": claim_dict.get("clinic_name") or extracted_data.get("clinic_name"),
+        "raw_text": (claim_dict.get("raw_text") or "")[:12000],
+        "extracted_data": extracted_data,
+        "parsed_evidence": parsed_evidence,
+        "cross_reference": cross_ref_result,
+        "invoice_summary": invoice_summary,
         "decision": dict(decision) if decision else None,
         "fraud": dict(fraud) if fraud else None,
     }
@@ -473,16 +528,30 @@ async def metrics(user: dict = Depends(get_current_user)):
 
     db_total_tokens = int(token_totals["total_tokens"] or 0)
     db_total_cost_myr = float(token_totals["total_cost_myr"] or 0.0)
-    claims_with_usage = int(token_totals["claims_with_usage"] or 0)
+    db_claims_with_usage = int(token_totals["claims_with_usage"] or 0)
     live_total_tokens = int(usage.get("total_tokens") or 0)
-    effective_total_tokens = db_total_tokens if db_total_tokens > 0 else live_total_tokens
+    live_total_cost_myr = float(usage.get("total_cost_myr") or 0.0)
+    live_claims_with_usage = int(usage.get("claims_with_usage") or 0)
+    live_calls = int(usage.get("calls") or 0)
+
+    # Prefer live in-memory counters for active runtime telemetry.
+    # Fall back to DB totals when the process has no live usage data.
+    if live_calls > 0 or live_total_tokens > 0:
+        effective_total_tokens = live_total_tokens
+        effective_total_cost_myr = live_total_cost_myr if live_total_cost_myr > 0 else db_total_cost_myr
+        claims_with_usage = live_claims_with_usage if live_claims_with_usage > 0 else db_claims_with_usage
+    else:
+        effective_total_tokens = db_total_tokens
+        effective_total_cost_myr = db_total_cost_myr
+        claims_with_usage = db_claims_with_usage
 
     usage["total_tokens"] = effective_total_tokens
-    usage["total_cost_myr"] = db_total_cost_myr
+    usage["total_cost_myr"] = effective_total_cost_myr
     usage["claims_with_usage"] = claims_with_usage
+    usage["lifetime_total_tokens"] = db_total_tokens
     usage["avg_tokens_per_claim"] = round(effective_total_tokens / total_claims, 2) if total_claims else 0.0
-    usage["avg_cost_per_claim_myr"] = round(db_total_cost_myr / total_claims, 8) if total_claims else 0.0
-    usage["avg_cost_per_processed_claim_myr"] = round(db_total_cost_myr / claims_with_usage, 8) if claims_with_usage else 0.0
+    usage["avg_cost_per_claim_myr"] = round(effective_total_cost_myr / total_claims, 8) if total_claims else 0.0
+    usage["avg_cost_per_processed_claim_myr"] = round(effective_total_cost_myr / claims_with_usage, 8) if claims_with_usage else 0.0
     return usage
 
 @app.get("/api/analytics/summary")

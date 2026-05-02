@@ -813,7 +813,7 @@ async function submitClaim() {
             throw new Error("Visit Date must be in YYYY-MM-DD format.");
         }
         if (ageDays > 365) {
-            throw new Error(`Visit Date (${visitDate}) looks too old (${ageDays} days). Please check the claim note date line.`);
+            console.warn(`Visit Date (${visitDate}) is ${ageDays} days old; continuing so backend can adjudicate late-filing rules.`);
         }
 
         const payload = {

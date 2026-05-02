@@ -249,13 +249,25 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
         else:
             question = user_prompt.lower()
             
-        reasoning = context_data.get("decision", {}).get("reasoning", "the claim did not meet policy guidelines")
-        decision = context_data.get("decision", {}).get("result", "DENIED")
-        status = context_data.get("status", "DENIED")
+        decision_obj = context_data.get("decision") or {}
+        reasoning = decision_obj.get("reasoning", "the claim did not meet policy guidelines")
+        decision = decision_obj.get("decision") or decision_obj.get("result") or "UNDER_REVIEW"
+        status = context_data.get("status") or decision
+        diagnosis_label = context_data.get("diagnosis") or "this visit"
+        diagnosis_label_bm = context_data.get("diagnosis") or "lawatan ini"
+        invoice_summary = context_data.get("invoice_summary")
         
         if "similar" in question:
-            answer = f"I found 3 similar claims from {context_data.get('clinic', 'your clinic')} in the past month that were {decision} for similar reasons. Ensuring that filing deadlines and documentation are complete will help reduce these occurrences."
-            answer_bm = f"Saya dapati 3 tuntutan serupa dari {context_data.get('clinic', 'klinik anda')} pada bulan lalu yang {decision} atas sebab yang serupa. Memastikan tarikh akhir pemfailan dan dokumentasi lengkap akan membantu mengurangkan kejadian ini."
+            clinic_name = context_data.get("clinic_name") or context_data.get("clinic") or "your clinic"
+            answer = f"I found 3 similar claims from {clinic_name} in the past month that were {decision} for similar reasons. Ensuring that filing deadlines and documentation are complete will help reduce these occurrences."
+            answer_bm = f"Saya dapati 3 tuntutan serupa dari {clinic_name} pada bulan lalu yang {decision} atas sebab yang serupa. Memastikan tarikh akhir pemfailan dan dokumentasi lengkap akan membantu mengurangkan kejadian ini."
+        elif "invoice" in question or "bill" in question:
+            if invoice_summary:
+                answer = f"The uploaded invoice indicates: {invoice_summary}"
+                answer_bm = f"Invois yang dimuat naik menunjukkan: {invoice_summary}"
+            else:
+                answer = "I could not find a parsed itemized invoice for this claim. Upload an invoice image/PDF so I can summarize billed items."
+                answer_bm = "Saya tidak menemui invois terperinci yang telah diparse untuk tuntutan ini. Muat naik imej/PDF invois supaya saya boleh merumuskan item yang dibil."
         elif "x-ray" in question or "pneumonia" in question or "infiltrates" in question:
             answer = "Yes, the HuggingFace Vision extraction of the uploaded Chest X-ray indicates bilateral infiltrates, which is highly consistent with a diagnosis of Pneumonia. This imaging finding is the primary clinical evidence justifying the prescription of Amoxicillin and the overall complexity of the visit."
             answer_bm = "Ya, pengekstrakan Visi HuggingFace dari X-ray dada yang dimuat naik menunjukkan infiltrasi dua hala, yang sangat konsisten dengan diagnosis Pneumonia. Penemuan pengimejan ini adalah bukti klinikal utama yang mewajarkan preskripsi Amoxicillin."
@@ -272,8 +284,8 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
             answer = f"Based on the system's analysis, this claim's status is {status}. The specific reasoning provided by the adjudication engine is: '{reasoning}'."
             answer_bm = f"Berdasarkan analisis sistem, status tuntutan ini ialah {status}. Alasan khusus yang diberikan oleh enjin adjudikasi ialah: '{reasoning}'."
         else:
-            answer = f"Regarding your claim for {context_data.get('diagnosis', 'this visit')}, the current status is {status}. The primary adjudication reason is: {reasoning}."
-            answer_bm = f"Mengenai tuntutan anda untuk {context_data.get('diagnosis', 'lawatan ini')}, status semasa ialah {status}. Alasan adjudikasi utama ialah: {reasoning}."
+            answer = f"Regarding your claim for {diagnosis_label}, the current status is {status}. The primary adjudication reason is: {reasoning}."
+            answer_bm = f"Mengenai tuntutan anda untuk {diagnosis_label_bm}, status semasa ialah {status}. Alasan adjudikasi utama ialah: {reasoning}."
 
         return json.dumps({
             "answer": answer,
@@ -347,15 +359,71 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
 
 def _deterministic_extract_from_text(raw_text: str) -> dict:
     text = raw_text or ""
+
     def _line_field(label: str):
         m = re.search(rf"(?:^|\n)\s*{re.escape(label)}\s*:\s*(.+)", text, flags=re.IGNORECASE)
         return m.group(1).strip().split("\n")[0].strip() if m else None
+
+    def _clean_diagnosis(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        dx = re.sub(r"\s+", " ", value).strip()
+        dx = re.sub(
+            r"^(?:diagnosis|dx|assessment(?:\s*(?:&|and)\s*plan)?|impression|final diagnosis|primary diagnosis)\s*[:\-]\s*",
+            "",
+            dx,
+            flags=re.IGNORECASE,
+        ).strip()
+        # In notes like "Assessment & Plan: Dengue. Start IV fluids", keep the diagnosis sentence only.
+        dx = re.split(r"(?<=[.?!])\s+", dx, maxsplit=1)[0].strip()
+        dx = re.sub(
+            r"\b(?:patient|plan|treat(?:ment)?|prescrib(?:ed)?|initiat(?:e|ing)|ordered?|admit(?:ted|sion)?|transfer)\b.*$",
+            "",
+            dx,
+            flags=re.IGNORECASE,
+        ).strip(" .,;:-")
+        if len(dx) < 3:
+            return None
+        return dx
+
+    def _infer_diagnosis() -> Optional[str]:
+        direct = _clean_diagnosis(_line_field("Diagnosis"))
+        if direct:
+            return direct
+
+        alt_labels = [
+            "Assessment & Plan",
+            "Assessment and Plan",
+            "Assessment",
+            "Impression",
+            "Final Diagnosis",
+            "Primary Diagnosis",
+            "Clinical Impression",
+        ]
+        for label in alt_labels:
+            candidate = _clean_diagnosis(_line_field(label))
+            if candidate:
+                return candidate
+
+        sentence_patterns = [
+            r"\bdiagnosed\s+with\s+([A-Za-z][A-Za-z0-9\s,/\-\(\)\[\]]{3,140})",
+            r"\bfinal\s+diagnosis\s*(?:is|:)?\s*([A-Za-z][A-Za-z0-9\s,/\-\(\)\[\]]{3,140})",
+            r"\bdiagnosis\s*(?:is|:)?\s*([A-Za-z][A-Za-z0-9\s,/\-\(\)\[\]]{3,140})",
+        ]
+        for pattern in sentence_patterns:
+            m = re.search(pattern, text, flags=re.IGNORECASE)
+            if not m:
+                continue
+            candidate = _clean_diagnosis(m.group(1))
+            if candidate:
+                return candidate
+        return None
 
     patient_name = _line_field("Name")
     patient_ic = _line_field("IC")
     clinic_name = _line_field("Clinic")
     visit_date = _line_field("Date")
-    diagnosis = _line_field("Diagnosis")
+    diagnosis = _infer_diagnosis()
     total_line = _line_field("Total")
 
     if not patient_ic:
