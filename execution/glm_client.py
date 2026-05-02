@@ -184,24 +184,121 @@ def _generate_unique_mock_visit_date(scenario_key: str, user_prompt: str) -> str
     offset_days = (int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % 13) + 1
     return (datetime.now(timezone.utc).date() - timedelta(days=offset_days)).isoformat()
 
+def _find_value_in_text(text: str, keywords: list, window: int = 200):
+    """Find a numeric value near any keyword in text."""
+    text_lower = text.lower()
+    for kw in keywords:
+        for m in re.finditer(re.escape(kw), text_lower):
+            snippet = text_lower[m.end():m.end()+window]
+            num_match = re.search(r'(\d+(?:[,.]\d+)?)', snippet)
+            if num_match:
+                try:
+                    val = float(num_match.group(1).replace(',', ''))
+                    if val > 0:
+                        return val
+                except ValueError:
+                    pass
+    return None
+
 def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
     """Provides highly realistic industry-standard mock responses if Z.AI API is unreachable."""
     if "alignment" in system_prompt.lower():
-        # Cross reference mock
+        # Intelligent cross-reference mock: compare evidence against doctor notes
+        contradictions = []
+        supporting = []
+        doc_notes = ""
+        evidence_data = []
+        if "## Doctor's Notes" in user_prompt:
+            parts = user_prompt.split("## Extracted Evidence Findings")
+            doc_notes = parts[0].replace("## Doctor's Notes", "").strip()
+            if len(parts) > 1:
+                try:
+                    evidence_data = json.loads(parts[1].strip())
+                except Exception:
+                    pass
+        doc_notes_lower = doc_notes.lower()
+        for ev in (evidence_data if isinstance(evidence_data, list) else []):
+            if not isinstance(ev, dict):
+                continue
+            parsed = ev.get("parsed_evidence") or {}
+            triage = ev.get("triage") or {}
+            doc_type = triage.get("doc_type", "UNKNOWN")
+            # Identity check
+            ev_name = parsed.get("patient_name_on_report") or parsed.get("patient_name_on_invoice") or ""
+            if ev_name:
+                name_m = re.search(r"(?:name|patient)\s*[:\-]\s*(.+?)(?:\n|$)", doc_notes, re.IGNORECASE)
+                sub_name = name_m.group(1).strip() if name_m else ""
+                if sub_name and ev_name:
+                    norm_sub = re.sub(r'[^A-Z]', '', sub_name.upper())
+                    norm_ev = re.sub(r'[^A-Z]', '', ev_name.upper())
+                    if norm_sub and norm_ev and norm_sub not in norm_ev and norm_ev not in norm_sub:
+                        tok_sub = set(sub_name.upper().split())
+                        tok_ev = set(ev_name.upper().split())
+                        if len(tok_sub & tok_ev) < max(1, min(len(tok_sub), len(tok_ev)) // 2):
+                            contradictions.append({"field": "Patient Name", "doctor_says": sub_name, "evidence_shows": ev_name, "discrepancy_percentage": 100})
+            # Lab value checks
+            if doc_type == "LAB_REPORT":
+                for res in (parsed.get("results") or []):
+                    test_name = (res.get("test") or "").lower()
+                    try:
+                        lab_val = float(res.get("value", 0))
+                    except (TypeError, ValueError):
+                        continue
+                    if "platelet" in test_name or "plt" in test_name:
+                        doc_plt = _find_value_in_text(doc_notes_lower, ["platelet", "plt"])
+                        if doc_plt is not None:
+                            c_doc, c_lab = doc_plt, lab_val
+                            if c_doc > 1000 and c_lab < 1000: c_doc /= 1000
+                            if c_lab > 1000 and c_doc < 1000: c_lab /= 1000
+                            diff = abs(c_doc - c_lab) / max(c_doc, c_lab, 1)
+                            if diff > 0.5:
+                                contradictions.append({"field": "Platelet Count", "doctor_says": str(doc_plt), "evidence_shows": str(lab_val), "discrepancy_percentage": round(diff * 100)})
+                            else:
+                                supporting.append(f"Platelet count aligns: ~{doc_plt} vs {lab_val}")
+                    elif "hematocrit" in test_name or "hct" in test_name:
+                        doc_hct = _find_value_in_text(doc_notes_lower, ["hematocrit", "hct"])
+                        if doc_hct is not None:
+                            diff = abs(doc_hct - lab_val) / max(doc_hct, lab_val, 1)
+                            if diff > 0.3:
+                                contradictions.append({"field": "Hematocrit", "doctor_says": f"{doc_hct}%", "evidence_shows": f"{lab_val}%", "discrepancy_percentage": round(diff * 100)})
+                            else:
+                                supporting.append(f"Hematocrit aligns: {lab_val}%")
+        alignment = "CONTRADICTION" if contradictions else ("FULL_ALIGNMENT" if supporting else "PARTIAL_ALIGNMENT")
         return json.dumps({
-            "alignment_status": "FULL_ALIGNMENT",
-            "supporting_evidence": ["Evidence generally aligns with description (mock)"],
-            "contradictory_evidence": [],
+            "alignment_status": alignment,
+            "supporting_evidence": supporting if supporting else ["Evidence reviewed (mock fallback)"],
+            "contradictory_evidence": contradictions,
             "unmentioned_findings": [],
-            "critical_contradiction_count": 0
+            "critical_contradiction_count": len(contradictions),
         })
     elif "invoice" in system_prompt.lower() and "validation" in system_prompt.lower():
-        # Invoice validation mock
+        # Intelligent invoice validation: compare items against doctor notes
+        unjustified = []
+        doc_notes = ""
+        invoice_data = {}
+        if "## Doctor's Notes" in user_prompt:
+            parts = user_prompt.split("## Itemized Invoice")
+            doc_notes = parts[0].replace("## Doctor's Notes (Treatment Described)", "").strip()
+            if len(parts) > 1:
+                try:
+                    invoice_data = json.loads(parts[1].strip())
+                except Exception:
+                    pass
+        doc_lower = doc_notes.lower()
+        total_unjust = 0.0
+        for item in (invoice_data.get("items") or []):
+            desc = (item.get("description") or "").lower()
+            amt = float(item.get("total") or item.get("unit_price") or 0)
+            keywords = [w for w in desc.split() if len(w) > 3]
+            found = any(kw in doc_lower for kw in keywords)
+            if not found and amt > 0:
+                unjustified.append({"item_description": item.get("description", "Unknown"), "amount": amt, "reason": f"'{item.get('description')}' not referenced in clinical notes."})
+                total_unjust += amt
         return json.dumps({
-            "alignment_status": "ALIGNED",
-            "unjustified_items": [],
+            "alignment_status": "PHANTOM_BILLING" if unjustified else "ALIGNED",
+            "unjustified_items": unjustified,
             "missing_expected_items": [],
-            "total_unjustified_amount": 0
+            "total_unjustified_amount": round(total_unjust, 2),
         })
     elif "validator" in system_prompt.lower():
         return json.dumps({
@@ -350,14 +447,43 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
         except Exception:
             pass
 
+        # Also extract cross-reference and parsed evidence from evidence sections
+        # (adjudicate_claim pops these from claim_data and appends them as sections)
+        cross_ref = claim_data.get("cross_ref_result") or claim_data.get("cross_reference") or claim_data.get("_cross_reference_result") or {}
+        parsed_ev_data = claim_data.get("_parsed_evidence") or []
+        if not cross_ref and "## Cross-Reference Engine Results" in user_prompt:
+            try:
+                xref_section = user_prompt.split("## Cross-Reference Engine Results")[1]
+                # Find the next section boundary or end
+                next_section = xref_section.find("\n\n## ")
+                if next_section > 0:
+                    xref_section = xref_section[:next_section]
+                xref_json_start = xref_section.find("{")
+                if xref_json_start >= 0:
+                    cross_ref = json.loads(xref_section[xref_json_start:xref_section.rfind("}") + 1])
+            except Exception:
+                pass
+        if not parsed_ev_data and "## Parsed Evidence" in user_prompt:
+            try:
+                ev_section = user_prompt.split("## Parsed Evidence")[1]
+                next_section = ev_section.find("\n\n## ")
+                if next_section > 0:
+                    ev_section = ev_section[:next_section]
+                ev_json_start = ev_section.find("[")
+                if ev_json_start >= 0:
+                    parsed_ev_data = json.loads(ev_section[ev_json_start:ev_section.rfind("]") + 1])
+            except Exception:
+                pass
+
         diagnosis = (claim_data.get("diagnosis") or claim_data.get("chief_complaint") or "").lower()
         total_amt = float(claim_data.get("total_amount_myr") or 0)
         patient_name = claim_data.get("patient_name") or "the patient"
         icd_code = claim_data.get("icd10_code") or claim_data.get("primary_diagnosis_code") or "J06.9"
         clinic = claim_data.get("clinic_name") or "the clinic"
-        has_evidence = bool(claim_data.get("_evidence_base64") or claim_data.get("parsed_evidence"))
-        cross_ref = claim_data.get("cross_ref_result") or claim_data.get("cross_reference") or {}
+        has_evidence = bool(claim_data.get("_evidence_base64") or parsed_ev_data)
         xref_verdict = (cross_ref.get("verdict") or "").upper()
+        xref_critical = cross_ref.get("critical_count", 0)
+        xref_checks = cross_ref.get("checks") or []
 
         # Amount thresholds per diagnosis category
         _AMOUNT_LIMITS = {
@@ -384,13 +510,29 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
         citations = []
 
         # Check cross-reference contradictions
-        if xref_verdict == "FAIL":
+        if xref_verdict == "FAIL" or xref_critical > 0:
             mock_decision = "REFERRED"
             confidence = 0.72
-            reasoning_parts.append(
-                f"Cross-reference validation flagged CRITICAL contradictions between the submitted claim "
-                f"and the supporting evidence documents. The claim requires manual investigation."
-            )
+            # Cite specific contradictions from the cross-reference engine
+            contradiction_details = []
+            for chk in xref_checks:
+                if chk.get("result") == "CRITICAL_CONTRADICTION":
+                    field = chk.get("field", "Unknown")
+                    doc_says = chk.get("doctor_says", "?")
+                    ev_shows = chk.get("lab_shows", chk.get("invoice_shows", "?"))
+                    contradiction_details.append(f"{field}: Claim states '{doc_says}' but evidence shows '{ev_shows}'")
+            if contradiction_details:
+                reasoning_parts.append(
+                    f"CRITICAL EVIDENCE CONTRADICTIONS DETECTED: " +
+                    "; ".join(contradiction_details) +
+                    ". The submitted claim data is inconsistent with the attached supporting documents. "
+                    "This claim requires immediate manual investigation for potential fraud."
+                )
+            else:
+                reasoning_parts.append(
+                    f"Cross-reference validation flagged CRITICAL contradictions between the submitted claim "
+                    f"and the supporting evidence documents. The claim requires manual investigation."
+                )
             citations.append({"clinical_basis": "Evidence contradiction", "policy_reference": "ClaimIQ Cross-Reference Protocol §4.2", "risk_flags": ["EVIDENCE_MISMATCH"]})
 
         # Check if amount exceeds expected range
