@@ -17,6 +17,7 @@ import json
 import time
 import logging
 import hashlib
+import re
 from typing import Optional
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -241,8 +242,10 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
             pass
 
         question = ""
-        if "Question:" in user_prompt:
-            question = user_prompt.split("Question:")[-1].strip().lower()
+        if "## Question" in user_prompt:
+            question = user_prompt.split("## Question", 1)[-1].strip().lower()
+        elif "Question:" in user_prompt:
+            question = user_prompt.split("Question:", 1)[-1].strip().lower()
         else:
             question = user_prompt.lower()
             
@@ -279,11 +282,8 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
             "follow_up_questions": ["Can I see similar denied claims?", "What is the fee schedule limit?", "How do I submit the appeal?"]
         })
     elif "extract" in system_prompt.lower():
-        # DEPRECATED: Simulated data removed to prevent AI hallucinations.
-        return json.dumps({
-            "error": "EXTRACTION_UNAVAILABLE",
-            "requires_llm": True
-        })
+        # Deterministic fallback extraction from raw note text.
+        return json.dumps(_deterministic_extract_from_text(user_prompt))
     elif "coder" in system_prompt.lower():
         if "fracture" in user_prompt.lower():
             return json.dumps({
@@ -343,6 +343,44 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
             "financial_impact": {"approved_amount_myr": 70.0, "potential_recovery_myr": 0, "optimization_savings_myr": 0}
         })
     return "{}"
+
+
+def _deterministic_extract_from_text(raw_text: str) -> dict:
+    text = raw_text or ""
+    def _line_field(label: str):
+        m = re.search(rf"(?:^|\n)\s*{re.escape(label)}\s*:\s*(.+)", text, flags=re.IGNORECASE)
+        return m.group(1).strip().split("\n")[0].strip() if m else None
+
+    patient_name = _line_field("Name")
+    patient_ic = _line_field("IC")
+    clinic_name = _line_field("Clinic")
+    visit_date = _line_field("Date")
+    diagnosis = _line_field("Diagnosis")
+    total_line = _line_field("Total")
+
+    if not patient_ic:
+        m_ic = re.search(r"\b\d{6}-\d{2}-\d{4}\b", text)
+        patient_ic = m_ic.group(0) if m_ic else None
+    if not visit_date:
+        m_date = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
+        visit_date = m_date.group(0) if m_date else None
+    total_amount = None
+    if total_line:
+        m_total = re.search(r"(\d+(?:\.\d+)?)", total_line.replace(",", ""))
+        total_amount = float(m_total.group(1)) if m_total else None
+    if total_amount is None:
+        m_total2 = re.search(r"\bRM\s*(\d+(?:\.\d+)?)\b", text, flags=re.IGNORECASE)
+        total_amount = float(m_total2.group(1)) if m_total2 else None
+
+    return {
+        "patient_name": patient_name,
+        "patient_ic": patient_ic,
+        "visit_date": visit_date,
+        "clinic_name": clinic_name,
+        "diagnosis": diagnosis,
+        "total_amount_myr": total_amount,
+        "extraction_confidence": 0.6,
+    }
 
 
 # --- Prompt Templates (loaded from separate module for cleanliness) ---
@@ -443,6 +481,10 @@ def extract_claim_data(raw_text: str, claim_id: int = None) -> dict:
     """GLM Fn 1: Unstructured clinical text -> structured claim JSON."""
     result = _call_glm(EXTRACT_SYSTEM, f"Extract claim data:\n\n{raw_text}", temperature=0.1, claim_id=claim_id)
     data = json.loads(result)
+    if not isinstance(data, dict):
+        data = {}
+    if data.get("error"):
+        data = {}
 
     # Check which required fields are missing from live extraction
     required = ["patient_name", "patient_ic", "visit_date", "clinic_name", "diagnosis", "total_amount_myr"]
@@ -451,6 +493,12 @@ def extract_claim_data(raw_text: str, claim_id: int = None) -> dict:
     env = (os.getenv("APP_ENV") or os.getenv("ENV") or "dev").lower()
     is_prod = env in {"prod", "production"}
     if missing:
+        deterministic = _deterministic_extract_from_text(raw_text)
+        for field in list(missing):
+            if deterministic.get(field):
+                data[field] = deterministic[field]
+        missing = [k for k in required if not data.get(k)]
+
         if is_prod:
             raise GLMServiceUnavailable(
                 f"SERVICE_UNAVAILABLE: Missing required extraction fields from live model: {missing}"

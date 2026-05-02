@@ -164,7 +164,7 @@ async def upload_supporting_file(
     return {"upload_id": asset_id, "filename": file.filename, "content_type": content_type, "size_bytes": len(content)}
 
 @app.post("/api/claims/submit")
-async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(["CLINIC_USER"]))):
+async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(["CLINIC_USER", "SYSTEM_ADMIN"]))):
     visit = datetime.strptime(body.visit_date, "%Y-%m-%d").date()
     if visit > datetime.now(timezone.utc).date():
         raise HTTPException(422, "Visit date cannot be in the future")

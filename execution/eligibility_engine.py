@@ -45,11 +45,13 @@ def check_eligibility(ic_number: str, visit_date_str: str, total_amount: float =
     Returns structured eligibility result.
     """
     if not db.has_members_seeded():
+        ensure_members_seeded()
+    if not db.has_members_seeded():
         return {
             "eligible": False,
             "reason": "MEMBER_REGISTRY_UNAVAILABLE",
             "carc_code": "MA130",
-            "message": "Member registry is empty. Run seed/migration command before adjudication.",
+            "message": "Member registry is empty after auto-seed attempt.",
             "member": None,
             "patient_responsibility_myr": 0.0,
         }
