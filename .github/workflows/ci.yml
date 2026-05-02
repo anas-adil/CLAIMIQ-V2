@@ -33,6 +33,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
       - name: Pull Vercel Environment
