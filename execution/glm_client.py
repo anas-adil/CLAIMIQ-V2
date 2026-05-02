@@ -437,43 +437,70 @@ def _get_intelligent_mock(system_prompt: str, user_prompt: str) -> str:
             })
     elif "adjudication engine" in system_prompt.lower():
         # Intelligent scenario-aware adjudication mock.
-        # Parse claim data from the prompt to produce realistic decisions.
+        # New prompt format (adjudicate_claim v2) has a task block followed by
+        # named sections (## Claim Data, ## Policy Context, etc.) each containing
+        # separate JSON blobs. We must extract from the right section — the old
+        # find("{") + rfind("}") approach spans all sections and produces invalid JSON.
         claim_data = {}
-        try:
-            if "{" in user_prompt:
+
+        def _extract_section_json(prompt: str, header: str, bracket_open: str = "{", bracket_close: str = "}") -> object:
+            """Extract the first JSON object/array from a named ## section."""
+            if header not in prompt:
+                return None
+            section = prompt.split(header, 1)[1]
+            boundary = section.find("\n\n##")
+            if boundary > 0:
+                section = section[:boundary]
+            start = section.find(bracket_open)
+            if start < 0:
+                return None
+            end = section.rfind(bracket_close)
+            if end < 0:
+                return None
+            try:
+                return json.loads(section[start:end + 1])
+            except Exception:
+                return None
+
+        # Try new section-based extraction first.
+        parsed_section = _extract_section_json(user_prompt, "## Claim Data")
+        if isinstance(parsed_section, dict):
+            claim_data = parsed_section
+        else:
+            # Legacy fallback: single JSON blob in the whole prompt.
+            try:
                 start = user_prompt.find("{")
                 end = user_prompt.rfind("}") + 1
-                claim_data = json.loads(user_prompt[start:end])
-        except Exception:
-            pass
+                if start >= 0:
+                    claim_data = json.loads(user_prompt[start:end]) or {}
+            except Exception:
+                pass
 
-        # Also extract cross-reference and parsed evidence from evidence sections
-        # (adjudicate_claim pops these from claim_data and appends them as sections)
-        cross_ref = claim_data.get("cross_ref_result") or claim_data.get("cross_reference") or claim_data.get("_cross_reference_result") or {}
-        parsed_ev_data = claim_data.get("_parsed_evidence") or []
-        if not cross_ref and "## Cross-Reference Engine Results" in user_prompt:
-            try:
-                xref_section = user_prompt.split("## Cross-Reference Engine Results")[1]
-                # Find the next section boundary or end
-                next_section = xref_section.find("\n\n## ")
-                if next_section > 0:
-                    xref_section = xref_section[:next_section]
-                xref_json_start = xref_section.find("{")
-                if xref_json_start >= 0:
-                    cross_ref = json.loads(xref_section[xref_json_start:xref_section.rfind("}") + 1])
-            except Exception:
-                pass
-        if not parsed_ev_data and "## Parsed Evidence" in user_prompt:
-            try:
-                ev_section = user_prompt.split("## Parsed Evidence")[1]
-                next_section = ev_section.find("\n\n## ")
-                if next_section > 0:
-                    ev_section = ev_section[:next_section]
-                ev_json_start = ev_section.find("[")
-                if ev_json_start >= 0:
-                    parsed_ev_data = json.loads(ev_section[ev_json_start:ev_section.rfind("]") + 1])
-            except Exception:
-                pass
+        # If amount or diagnosis is still missing, parse from the CLAIM summary line
+        # that adjudicate_claim() injects: "CLAIM: patient | clinic | Diagnosis: X | Billed: RM Y"
+        if not claim_data.get("total_amount_myr"):
+            m = re.search(r"Billed:\s*RM\s*([\d.]+)", user_prompt)
+            if m:
+                try:
+                    claim_data["total_amount_myr"] = float(m.group(1))
+                except ValueError:
+                    pass
+        if not claim_data.get("diagnosis"):
+            m = re.search(r"Diagnosis:\s*([^|()\n]+?)(?:\s*\(|\s*\|)", user_prompt)
+            if m:
+                claim_data["diagnosis"] = m.group(1).strip()
+
+        # Extract cross-reference and parsed evidence from their named sections.
+        cross_ref = (
+            claim_data.get("_cross_reference_result")
+            or _extract_section_json(user_prompt, "## Cross-Reference Engine Results")
+            or {}
+        )
+        parsed_ev_data = (
+            claim_data.get("_parsed_evidence")
+            or _extract_section_json(user_prompt, "## Gemini-Parsed Evidence Documents", "[", "]")
+            or []
+        )
 
         diagnosis = (claim_data.get("diagnosis") or claim_data.get("chief_complaint") or "").lower()
         total_amt = float(claim_data.get("total_amount_myr") or 0)

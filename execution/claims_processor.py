@@ -299,10 +299,12 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             full_claim = {**extracted, **coded}
             # Re-assert authoritative amount — coding response must never override the
             # submitted total (live LLM sometimes hallucinate 0 for this field).
-            _auth_amount = (
-                float(claim["total_amount_myr"])
-                if claim and claim.get("total_amount_myr") is not None
-                else float(extracted.get("total_amount_myr") or 0)
+            # Use dict(claim) conversion to safely handle SQLite Row objects.
+            _claim_dict = dict(claim) if claim else {}
+            _auth_amount = float(
+                _claim_dict.get("total_amount_myr")
+                or extracted.get("total_amount_myr")
+                or 0
             )
             full_claim["total_amount_myr"] = _auth_amount
 

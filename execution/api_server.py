@@ -738,6 +738,87 @@ async def export_claim(claim_id: int, user: dict = Depends(get_current_user)):
 async def health():
     return {"status": "ok", "service": "ClaimIQ MVP"}
 
+
+@app.get("/api/debug/env")
+async def debug_env(user: dict = Depends(get_current_user)):
+    """Check all environment variables and live-test GLM + Gemini connectivity.
+    Requires auth. Returns masked key prefixes so nothing sensitive is exposed."""
+    def _mask(val: str) -> str:
+        if not val:
+            return "MISSING"
+        return f"SET ({val[:6]}...{val[-4:]})" if len(val) > 12 else "SET (***)"
+
+    api_key   = os.getenv("ILMU_API_KEY") or os.getenv("ZAI_API_KEY") or ""
+    base_url  = os.getenv("ILMU_BASE_URL") or os.getenv("ZAI_BASE_URL") or "https://api.z.ai/api/paas/v4"
+    model_id  = os.getenv("ILMU_MODEL") or os.getenv("ZAI_MODEL") or "glm-4-plus"
+    gemini_key = os.getenv("gemini") or os.getenv("GEMINI_API_KEY") or ""
+    app_env   = os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
+    db_path   = os.getenv("DB_PATH") or ".tmp/claimiq.db"
+    medgemma_url = os.getenv("MEDGEMMA_API_URL") or ""
+    gemini_model = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash (default)"
+
+    result = {
+        "app_env": app_env,
+        "ilmu_api_key": _mask(api_key),
+        "ilmu_base_url": base_url,
+        "ilmu_model": model_id,
+        "gemini_key": _mask(gemini_key),
+        "gemini_model": gemini_model,
+        "medgemma_api_url": medgemma_url or "NOT SET (using Gemini direct)",
+        "db_path": db_path,
+        "glm_live_test": "NOT RUN",
+        "gemini_live_test": "NOT RUN",
+        "issues": [],
+    }
+
+    # Flag config problems
+    if not api_key:
+        result["issues"].append("ILMU_API_KEY / ZAI_API_KEY is not set — GLM will use mock responses")
+    if api_key.startswith("ILMU-") and "api.z.ai" in base_url:
+        result["issues"].append("Provider mismatch: ILMU-style key with Z.AI base URL — set ILMU_BASE_URL correctly")
+    if not gemini_key:
+        result["issues"].append("gemini / GEMINI_API_KEY is not set — evidence PDF/image parsing will fail")
+    if app_env not in ("prod", "production"):
+        result["issues"].append(
+            f"APP_ENV='{app_env}' — mock responses are used instead of raising errors when APIs fail; "
+            "set APP_ENV=production on Vercel to see real failures"
+        )
+
+    # Live-test GLM
+    if api_key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            resp = client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": "Reply with exactly: CLAIMIQ_OK"}],
+                max_tokens=10,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            result["glm_live_test"] = f"PASS — model replied: {content[:60]}"
+        except Exception as e:
+            result["glm_live_test"] = f"FAIL — {str(e)[:300]}"
+            result["issues"].append(f"GLM live test failed: {str(e)[:200]}")
+    else:
+        result["glm_live_test"] = "SKIPPED — no API key"
+
+    # Live-test Gemini
+    if gemini_key:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key.strip())
+            gmodel = genai.GenerativeModel(os.getenv("GEMINI_MODEL") or "gemini-1.5-flash")
+            gresp = gmodel.generate_content("Reply with exactly: CLAIMIQ_OK")
+            result["gemini_live_test"] = f"PASS — model replied: {(gresp.text or '').strip()[:60]}"
+        except Exception as e:
+            result["gemini_live_test"] = f"FAIL — {str(e)[:300]}"
+            result["issues"].append(f"Gemini live test failed: {str(e)[:200]}")
+    else:
+        result["gemini_live_test"] = "SKIPPED — no API key"
+
+    result["overall"] = "OK" if not result["issues"] else f"{len(result['issues'])} issue(s) found"
+    return result
+
 frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
 if os.path.isdir(frontend_dir):
     app.mount("/", StaticFiles(directory=frontend_dir, html=True), name="frontend")
