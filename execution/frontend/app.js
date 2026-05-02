@@ -657,8 +657,18 @@ function handleFileSelect(inputId, displayId) {
 }
 
 async function uploadSupportingFile(file) {
+    const maxUploadBytes = 1.8 * 1024 * 1024; // keep well under serverless body ceilings
+    let uploadFile = file;
+
+    if (file.type.startsWith("image/")) {
+        uploadFile = await optimizeImageForUpload(file, maxUploadBytes);
+    }
+    if (uploadFile.size > maxUploadBytes) {
+        throw new Error(`File "${file.name}" is too large to upload. Please use a smaller image.`);
+    }
+
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append("file", uploadFile, uploadFile.name || file.name);
     const res = await apiFetch("/uploads", {
         method: "POST",
         body: formData
@@ -669,6 +679,49 @@ async function uploadSupportingFile(file) {
         throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return data.upload_id;
+}
+
+async function optimizeImageForUpload(file, targetBytes) {
+    const originalDataUrl = await new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = e => resolve(e.target.result);
+        reader.readAsDataURL(file);
+    });
+    const img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = reject;
+        el.src = originalDataUrl;
+    });
+
+    let maxDim = 1600;
+    let quality = 0.82;
+    for (let i = 0; i < 7; i++) {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+        if (blob && blob.size <= targetBytes) {
+            return new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
+        }
+        maxDim = Math.max(700, Math.round(maxDim * 0.82));
+        quality = Math.max(0.5, quality - 0.06);
+    }
+
+    // Best-effort fallback
+    const fallbackCanvas = document.createElement("canvas");
+    const scale = Math.min(1, 900 / Math.max(img.width, img.height));
+    fallbackCanvas.width = Math.max(1, Math.round(img.width * scale));
+    fallbackCanvas.height = Math.max(1, Math.round(img.height * scale));
+    fallbackCanvas.getContext("2d").drawImage(img, 0, 0, fallbackCanvas.width, fallbackCanvas.height);
+    const fallbackBlob = await new Promise((resolve) => fallbackCanvas.toBlob(resolve, "image/jpeg", 0.5));
+    return new File([fallbackBlob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" });
 }
 
 // --- CLAIM SUBMISSION PIPELINE ---
