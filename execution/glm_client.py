@@ -902,19 +902,21 @@ CODING_SYSTEM = (
 )
 
 ADJUDICATION_SYSTEM = (
-    "You are the ClaimIQ Adjudication Engine (Senior Medical Auditor) for Malaysian TPA claims. "
-    "Output JSON: decision (APPROVED|DENIED|REFERRED), confidence (0-1), "
-    "reasoning (must be highly detailed, citing specific lab values, X-ray findings, or clinical notes provided in the ATTACHED EVIDENCE), "
-    "reasoning_citations (array of {clinical_basis, policy_reference, risk_flags}), "
-    "policy_references (array), amount_approved_myr, amount_denied_myr, "
-    "denial_reasons (array), conditions (array), appeal_recommendation, "
-    "processing_notes, adjudication_confidence (0-1). "
-    "Check: coverage, amount limits, medical necessity, medication appropriateness. "
-    "CRITICAL: You must ground all conclusions in provided evidence sections and deterministic rule outputs. "
-    "If deterministic validation contains IDENTITY_MISMATCH or DATE_MISMATCH with CRITICAL severity, "
-    "set decision to REFERRED and explain mismatch first before any coverage logic. "
-    "Do not claim 'missing supporting documents' when parsed evidence includes relevant invoice/lab sections. "
-    "When rule_hits are present, cite rule IDs explicitly in reasoning_citations."
+    "You are the ClaimIQ Adjudication Engine (Senior Medical Auditor) for Malaysian TPA claims.\n"
+    "MANDATORY OUTPUT RULES — violating any of these is an error:\n"
+    "1. The 'reasoning' field MUST contain at least 4 complete sentences. NEVER output null, empty string, or a placeholder.\n"
+    "2. Always cite: the specific diagnosis + ICD code, the billed amount compared to the Malaysian fee schedule benchmark for that diagnosis, and the clinical notes.\n"
+    "3. If '## Gemini-Parsed Evidence Documents' is present: for EACH document state whether it SUPPORTS or CONTRADICTS the clinical description — quote specific values (lab numbers, invoice totals, X-ray findings).\n"
+    "4. If no evidence is present: reason from the clinical notes and published fee schedule for the stated diagnosis alone.\n"
+    "5. If cross-reference shows FAIL verdict: lead reasoning with the exact contradiction details.\n"
+    "6. If deterministic rule_hits are present: cite rule IDs in reasoning.\n\n"
+    "Output ONLY valid JSON with ALL fields populated:\n"
+    "{ \"decision\": \"APPROVED|DENIED|REFERRED\", \"confidence\": 0-1, "
+    "\"reasoning\": \"<detailed multi-sentence analysis — REQUIRED, min 4 sentences>\", "
+    "\"reasoning_citations\": [{\"clinical_basis\": \"...\", \"policy_reference\": \"...\", \"risk_flags\": [...]}], "
+    "\"policy_references\": [...], \"amount_approved_myr\": 0, \"amount_denied_myr\": 0, "
+    "\"denial_reasons\": [], \"conditions\": [], \"appeal_recommendation\": \"...\", "
+    "\"processing_notes\": \"...\", \"adjudication_confidence\": 0-1 }"
 )
 
 FRAUD_SYSTEM = (
@@ -1029,21 +1031,51 @@ def adjudicate_claim(coded_claim: dict, policy_context: str, claim_id: int = Non
     parsed_ev = coded_claim.pop("_parsed_evidence", None)
     xref_res = coded_claim.pop("_cross_reference_result", None)
     validation_res = coded_claim.pop("_validation_result", None)
-    coded_claim.pop("_fallback_fields", None)  # don't send internal metadata to LLM
+    coded_claim.pop("_fallback_fields", None)
 
-    # Build evidence sections
-    sections = []
+    # One-line claim summary to anchor GLM reasoning
+    diagnosis = coded_claim.get("diagnosis") or coded_claim.get("chief_complaint") or "unspecified"
+    amount = float(coded_claim.get("total_amount_myr") or 0)
+    patient = coded_claim.get("patient_name") or "the patient"
+    clinic = coded_claim.get("clinic_name") or "the clinic"
+    icd = coded_claim.get("primary_diagnosis_code") or coded_claim.get("icd10_code") or ""
+    claim_summary = (
+        f"CLAIM: {patient} | {clinic} | Diagnosis: {diagnosis} ({icd}) | Billed: RM {amount:.2f}"
+    )
+
+    # Explicit task statement drives reasoning output even when evidence is absent
+    has_evidence = bool(parsed_ev)
+    evidence_instruction = (
+        "Evidence comparison REQUIRED: for each Gemini-parsed document below, "
+        "explicitly state whether it SUPPORTS or CONTRADICTS the clinical description and quote specific values."
+        if has_evidence else
+        "No evidence documents were attached — reason from the clinical notes and Malaysian fee schedule for this diagnosis."
+    )
+
+    task_block = (
+        f"{claim_summary}\n\n"
+        f"ADJUDICATION TASK:\n"
+        f"1. Assess clinical necessity: is the diagnosis consistent with the described symptoms/notes?\n"
+        f"2. Compare billed amount (RM {amount:.2f}) against Malaysian TPA fee schedule for {diagnosis}.\n"
+        f"3. {evidence_instruction}\n"
+        f"4. State final decision (APPROVED / DENIED / REFERRED) with confidence and full reasoning.\n"
+        f"Your 'reasoning' field MUST cover all four points above in full sentences.\n"
+    )
+
+    sections = [
+        f"\n\n## Claim Data\n{json.dumps(coded_claim, indent=2)}",
+        f"\n\n## Policy Context\n{policy_context}",
+    ]
     if parsed_ev:
-        sections.append(f"\n\n## Parsed Evidence (via MedGemma)\n{json.dumps(parsed_ev, indent=2)}")
+        sections.append(f"\n\n## Gemini-Parsed Evidence Documents\n{json.dumps(parsed_ev, indent=2)}")
     if xref_res:
         sections.append(f"\n\n## Cross-Reference Engine Results\n{json.dumps(xref_res, indent=2)}")
     if validation_res:
         sections.append(f"\n\n## Deterministic Validation Findings\n{json.dumps(validation_res, indent=2)}")
     if evidence_packet:
-        sections.append(f"\n\n## Raw Clinical Evidence Packet\n{evidence_packet}")
+        sections.append(f"\n\n## Raw Clinical Notes\n{evidence_packet}")
 
-    evidence_section = "".join(sections)
-    prompt = f"## Claim\n{json.dumps(coded_claim, indent=2)}\n\n## Policy\n{policy_context}{evidence_section}"
+    prompt = task_block + "".join(sections)
     result = _call_glm(ADJUDICATION_SYSTEM, f"Adjudicate:\n\n{prompt}", temperature=0.2, claim_id=claim_id)
     return json.loads(result)
 

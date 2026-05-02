@@ -325,13 +325,25 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             if decision.get("confidence") is None:
                 decision["confidence"] = 0.65
             if not str(decision.get("reasoning") or "").strip():
-                for alias in ("reason", "explanation", "rationale", "processing_notes"):
+                for alias in (
+                    "reason", "explanation", "rationale", "processing_notes",
+                    "analysis", "adjudication_reasoning", "detailed_reasoning",
+                    "notes", "clinical_reasoning", "decision_rationale",
+                ):
                     alias_val = decision.get(alias)
                     if isinstance(alias_val, str) and alias_val.strip():
                         decision["reasoning"] = alias_val.strip()
                         break
             if not str(decision.get("reasoning") or "").strip():
-                decision["reasoning"] = "Initial adjudication completed. Claim routed for manual review."
+                _diag = extracted.get("diagnosis") or extracted.get("chief_complaint") or "unspecified diagnosis"
+                _icd = coded.get("primary_diagnosis_code") or "N/A"
+                _amt = float(extracted.get("total_amount_myr") or 0)
+                _clinic = extracted.get("clinic_name") or "the clinic"
+                decision["reasoning"] = (
+                    f"Claim for {_diag} (ICD: {_icd}) at {_clinic}, billed RM {_amt:.2f}. "
+                    "The adjudication engine processed this claim but did not return detailed reasoning from the AI model. "
+                    "The claim has been routed for manual review to ensure proper evaluation against policy guidelines and fee schedules."
+                )
 
             decision["denial_prediction"] = denial_predictor.predict_denial(full_claim_with_evidence)
             result["steps"]["denial_predictor"] = decision["denial_prediction"]
