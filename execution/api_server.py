@@ -218,18 +218,25 @@ async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(
     conn.commit()
     conn.close()
     
-    # Run the heavy processing pipeline in a background thread so the API
-    # returns immediately. The frontend polls /api/claims/{id} to track progress.
-    def _bg_process():
+    # Run the heavy processing pipeline locally.
+    # On Vercel, serverless functions freeze background threads immediately
+    # after returning the response, so we MUST process synchronously.
+    if os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT"):
         try:
             claims_processor.process_claim(claim_id=claim_id)
         except Exception as e:
-            logger.error(f"Background processing failed for claim {claim_id}: {e}")
-    
-    t = threading.Thread(target=_bg_process, daemon=True)
-    t.start()
+            logger.error(f"Synchronous processing failed for claim {claim_id}: {e}")
+    else:
+        def _bg_process():
+            try:
+                claims_processor.process_claim(claim_id=claim_id)
+            except Exception as e:
+                logger.error(f"Background processing failed for claim {claim_id}: {e}")
         
-    return {"claim_id": claim_id, "status": "SUBMITTED"}
+        t = threading.Thread(target=_bg_process, daemon=True)
+        t.start()
+        
+    return {"message": "Claim submitted", "claim_id": claim_id, "status": "SUBMITTED"}
 
 @app.get("/api/claims/")
 async def get_claims_queue(
