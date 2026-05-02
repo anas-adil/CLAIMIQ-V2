@@ -109,12 +109,16 @@ def evaluate_phase1_disposition(
 
     # Eligibility can be a policy denial.
     if eligibility and not eligibility.get("eligible", True):
+        # "Member not found / registry unavailable" should not hard-deny in MVP cloud runs.
+        # Route to manual review to avoid false denials from seed/env drift.
+        elig_carc = eligibility.get("carc_code", "27")
+        elig_disposition = "PEND_REVIEW" if elig_carc == "MA130" else "DENY_POLICY"
         hits.append({
             "rule_id": "ELIG_001",
             "severity": "CRITICAL",
-            "disposition": "DENY_POLICY",
+            "disposition": elig_disposition,
             "reason": eligibility.get("message", "Eligibility failure."),
-            "carc": eligibility.get("carc_code", "27"),
+            "carc": elig_carc,
         })
 
     priority = {"REJECT_INVALID": 4, "DENY_POLICY": 3, "PEND_REVIEW": 2, "APPROVE": 1}

@@ -129,6 +129,15 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
                                         evidence_quality=parsed_evidence_list[0].get("triage", {}).get("quality"))
                 except Exception as e:
                     logger.error(f"Failed to parse evidence: {e}")
+                    # Preserve a non-empty parse record so deterministic gates know
+                    # attachments were present but parser runtime failed.
+                    if initial_data.get("_evidence_base64") or initial_data.get("_invoice_base64"):
+                        parsed_evidence_list.append({
+                            "source": "PARSE_RUNTIME_FAILED",
+                            "parsing_confidence": 0.0,
+                            "triage": {"doc_type": "UNKNOWN", "quality": "UNKNOWN"},
+                            "parsed_evidence": {"error": str(e)},
+                        })
             
             # Step 3.6: Evidence Quality & Completeness Gate
             logger.info(f"[{claim_id}] Step 3.6: Checking evidence completeness...")
