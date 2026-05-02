@@ -761,27 +761,33 @@ async function submitClaim() {
     };
 
     try {
-        // Read files as base64 data URLs inline — embed directly in the submit payload.
-        // Avoids broken two-step upload→ID-reference pattern: Vercel serverless gives
-        // each request a fresh ephemeral SQLite, so get_uploaded_asset() always returns
-        // None and images never reach the processor.
-        const readFileAsDataUrl = (file) => new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = e => resolve(e.target.result);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
+        // Read files as compressed base64 data URLs — embed directly in the submit payload.
+        // Avoids broken two-step upload→ID-reference pattern (Vercel serverless ephemeral DB).
+        // Images are compressed to ~800KB max each to stay under Vercel's 4.5MB payload limit.
+        const readFileAsCompressedDataUrl = async (file) => {
+            const maxPayloadBytes = 800 * 1024; // 800KB per image
+            let processedFile = file;
+            if (file.type.startsWith("image/")) {
+                processedFile = await optimizeImageForUpload(file, maxPayloadBytes);
+            }
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = e => resolve(e.target.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(processedFile);
+            });
+        };
 
         let evidenceBase64 = null;
         if (fileEvidence) {
-            btnSubmit.innerHTML = "Reading evidence document...";
-            evidenceBase64 = await readFileAsDataUrl(fileEvidence);
+            btnSubmit.innerHTML = "Compressing & reading evidence...";
+            evidenceBase64 = await readFileAsCompressedDataUrl(fileEvidence);
         }
 
         let invoiceBase64 = null;
         if (fileBill) {
-            btnSubmit.innerHTML = "Reading invoice document...";
-            invoiceBase64 = await readFileAsDataUrl(fileBill);
+            btnSubmit.innerHTML = "Compressing & reading invoice...";
+            invoiceBase64 = await readFileAsCompressedDataUrl(fileBill);
         }
 
         if (fileBill || fileEvidence) {
