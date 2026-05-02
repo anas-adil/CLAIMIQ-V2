@@ -36,6 +36,24 @@ async function apiFetch(endpoint, options = {}) {
     return res;
 }
 
+async function parseApiBody(res) {
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    const raw = await res.text();
+    if (!raw) return null;
+    if (contentType.includes("application/json")) {
+        try {
+            return JSON.parse(raw);
+        } catch (_) {
+            return { detail: raw };
+        }
+    }
+    try {
+        return JSON.parse(raw);
+    } catch (_) {
+        return { detail: raw };
+    }
+}
+
 async function doLogin() {
     const email = document.getElementById("loginEmail").value;
     const password = document.getElementById("loginPassword").value;
@@ -50,12 +68,12 @@ async function doLogin() {
         });
 
         if (!res.ok) {
-            const data = await res.json();
+            const data = await parseApiBody(res);
             const detail = typeof data.detail === 'object' ? JSON.stringify(data.detail) : data.detail;
             throw new Error(detail || "Login failed");
         }
 
-        const data = await res.json();
+        const data = await parseApiBody(res);
         authToken = data.access_token || data.token;
         currentUser = data.user;
         if (!authToken || !currentUser || !currentUser.role) {
@@ -732,14 +750,14 @@ async function submitClaim() {
             method: "POST", headers: {"Content-Type": "application/json"},
             body: JSON.stringify(payload)
         });
-        const initRes = await initResponse.json();
+        const initRes = await parseApiBody(initResponse);
         if (!initResponse.ok) {
             let detailStr = "Failed to submit claim.";
-            if (Array.isArray(initRes.detail)) {
+            if (initRes && Array.isArray(initRes.detail)) {
                 detailStr = initRes.detail.map(e => `${e.loc.join('.')}: ${e.msg}`).join('\n');
-            } else if (typeof initRes.detail === 'object') {
+            } else if (initRes && typeof initRes.detail === 'object') {
                 detailStr = JSON.stringify(initRes.detail);
-            } else if (initRes.detail) {
+            } else if (initRes && initRes.detail) {
                 detailStr = initRes.detail;
             }
             throw new Error(detailStr);
@@ -1139,10 +1157,10 @@ async function seedDemo() {
     try {
         const res = await apiFetch('/demo/seed', { method: 'POST' });
         if (!res.ok) {
-            const data = await res.json();
+            const data = await parseApiBody(res);
             throw new Error(data.detail || "Failed to seed demo");
         }
-        const data = await res.json();
+        const data = await parseApiBody(res);
 
         // Re-apply nav in case anything changed, then navigate to dashboard
         applyRoleNav();
