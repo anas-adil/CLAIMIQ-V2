@@ -783,15 +783,37 @@ async function submitClaim() {
             const m = notes.match(new RegExp(`(?:^|\\n)\\s*${label}\\s*:\\s*(.+)`, "i"));
             return (m && m[1] ? m[1].trim() : fallback).split("\n")[0].trim();
         };
+        const getFirstMatch = (patterns) => {
+            for (const p of patterns) {
+                const m = notes.match(p);
+                if (m && m[1]) return m[1].trim().split("\n")[0].trim();
+            }
+            return "";
+        };
         const patientName = getField("Name");
         const patientIc = getField("IC");
         const clinicName = getField("Clinic");
-        const visitDate = getField("Date");
-        const totalText = getField("Total");
+        const visitDate = getFirstMatch([
+            /(?:^|\n)\s*Visit\s*Date\s*:\s*(\d{4}-\d{2}-\d{2})/i,
+            /(?:^|\n)\s*Date\s*:\s*(\d{4}-\d{2}-\d{2})/i
+        ]) || getField("Date");
+        const totalText = getFirstMatch([
+            /(?:^|\n)\s*Total\s*(?:RM|MYR)?\s*:\s*([0-9][0-9,]*(?:\.\d+)?)/i,
+            /(?:^|\n)\s*Total\s*:\s*RM?\s*([0-9][0-9,]*(?:\.\d+)?)/i
+        ]) || getField("Total");
         const amountMatch = totalText.match(/(\d+(\.\d+)?)/);
         const totalAmount = amountMatch ? Number(amountMatch[1]) : null;
         if (!patientName || !patientIc || !clinicName || !visitDate || totalAmount === null) {
             throw new Error("Missing required fields in notes. Include lines: Name:, IC:, Clinic:, Date:(YYYY-MM-DD), Total:(RM).");
+        }
+        const vd = new Date(`${visitDate}T00:00:00`);
+        const now = new Date();
+        const ageDays = Math.floor((now - vd) / (1000 * 60 * 60 * 24));
+        if (isNaN(vd.getTime())) {
+            throw new Error("Visit Date must be in YYYY-MM-DD format.");
+        }
+        if (ageDays > 365) {
+            throw new Error(`Visit Date (${visitDate}) looks too old (${ageDays} days). Please check the claim note date line.`);
         }
 
         const payload = {
