@@ -104,9 +104,16 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     if image_b64 and image_b64.startswith("data:"):
         image_b64 = image_b64.split(",", 1)[-1]
 
-    gemini_key = os.getenv("gemini") or os.getenv("GEMINI_API_KEY")
+    gemini_key = (
+        os.getenv("GEMINI_API_KEY")
+        or os.getenv("gemini")
+        or os.getenv("gemini_api_key")
+    )
     if not gemini_key:
-        logger.error("Gemini API key missing in .env (tried 'gemini' and 'GEMINI_API_KEY')")
+        logger.error(
+            "Gemini API key missing. Set GEMINI_API_KEY on Vercel (Environment Variables → Production). "
+            "Tried: GEMINI_API_KEY, gemini, gemini_api_key"
+        )
         return {"error": "gemini_api_key_missing", "source": "GEMINI_LIVE"}
 
     # Model preference order: configured → 2.5-flash → 1.5-flash (fallback)
@@ -252,11 +259,15 @@ def classify_document(image_b64: str) -> dict:
 
 def health_check() -> dict:
     """Check if Gemini API key is configured."""
-    gemini_key = os.getenv("gemini") or os.getenv("GEMINI_API_KEY")
+    gemini_key = (
+        os.getenv("GEMINI_API_KEY")
+        or os.getenv("gemini")
+        or os.getenv("gemini_api_key")
+    )
     if gemini_key:
-        return {"status": "ok", "message": "Gemini API key is configured"}
+        return {"status": "ok", "message": "Gemini API key is configured", "env_var_found": "GEMINI_API_KEY" if os.getenv("GEMINI_API_KEY") else "gemini"}
     else:
-        return {"status": "error", "message": "Gemini API key is missing in .env"}
+        return {"status": "error", "message": "Gemini API key is missing. Set GEMINI_API_KEY in Vercel Environment Variables."}
 
 
 # ── Self-test ───────────────────────────────────────────────────────────────

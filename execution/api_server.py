@@ -247,6 +247,33 @@ async def submit_claim(body: ClaimSubmission, user: dict = Depends(require_role(
         
     return {"message": "Claim submitted", "claim_id": claim_id, "status": "SUBMITTED"}
 
+@app.post("/api/claims/{claim_id}/reprocess")
+async def reprocess_claim(claim_id: int, user: dict = Depends(require_role(["CLINIC_USER", "SYSTEM_ADMIN"]))):
+    # Verify the claim exists
+    conn = db.get_db()
+    claim = conn.execute("SELECT id FROM claims WHERE id=?", (claim_id,)).fetchone()
+    conn.close()
+    if not claim:
+        raise HTTPException(404, "Claim not found")
+
+    if os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT"):
+        try:
+            claims_processor.process_claim(claim_id=claim_id)
+        except Exception as e:
+            logger.error(f"Synchronous reprocessing failed for claim {claim_id}: {e}")
+            raise HTTPException(500, f"Processing failed: {str(e)}")
+    else:
+        def _bg_process():
+            try:
+                claims_processor.process_claim(claim_id=claim_id)
+            except Exception as e:
+                logger.error(f"Background reprocessing failed for claim {claim_id}: {e}")
+        
+        t = threading.Thread(target=_bg_process, daemon=True)
+        t.start()
+
+    return {"message": "Claim reprocessing triggered", "claim_id": claim_id}
+
 @app.get("/api/claims/")
 async def get_claims_queue(
     limit: int = 100,
@@ -764,7 +791,12 @@ async def debug_env(user: dict = Depends(get_current_user)):
     api_key   = os.getenv("ILMU_API_KEY") or os.getenv("ZAI_API_KEY") or ""
     base_url  = os.getenv("ILMU_BASE_URL") or os.getenv("ZAI_BASE_URL") or "https://api.z.ai/api/paas/v4"
     model_id  = os.getenv("ILMU_MODEL") or os.getenv("ZAI_MODEL") or "glm-4-plus"
-    gemini_key = os.getenv("gemini") or os.getenv("GEMINI_API_KEY") or ""
+    gemini_key = (
+        os.getenv("GEMINI_API_KEY")
+        or os.getenv("gemini")
+        or os.getenv("gemini_api_key")
+        or ""
+    )
     app_env   = os.getenv("APP_ENV") or os.getenv("ENV") or "dev"
     db_path   = os.getenv("DB_PATH") or ".tmp/claimiq.db"
     medgemma_url = os.getenv("MEDGEMMA_API_URL") or ""
@@ -795,6 +827,12 @@ async def debug_env(user: dict = Depends(get_current_user)):
         result["issues"].append(
             f"APP_ENV='{app_env}' — mock responses are used instead of raising errors when APIs fail; "
             "set APP_ENV=production on Vercel to see real failures"
+        )
+    if not (os.getenv("VERCEL") or os.getenv("AWS_REGION") or os.getenv("LAMBDA_TASK_ROOT")):
+        result["issues"].append(
+            "VERCEL environment variable not set. If running on Vercel, this must be set "
+            "to ensure synchronous processing of claims. Otherwise, background threads will be killed "
+            "before processing finishes."
         )
 
     # Live-test GLM
