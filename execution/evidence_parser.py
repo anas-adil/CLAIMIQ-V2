@@ -45,7 +45,11 @@ def parse_evidence(image_b64: str) -> dict:
         if "error" not in candidate:
             parsed = candidate
             break
-        last_error = candidate.get("error")
+        last_error = candidate.get("error", "")
+        # Short-circuit: quota exhaustion affects all models equally — no point retrying
+        if "quota_exhausted" in str(last_error) or "quota" in str(last_error).lower():
+            logger.warning(f"Gemini quota exhausted — skipping fallback analyzers")
+            break
         logger.warning(f"Evidence parser fallback attempt failed: {last_error}")
     if parsed is None:
         parsed = {"error": last_error or "parse_failed"}

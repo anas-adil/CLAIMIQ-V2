@@ -24,6 +24,8 @@ MEDGEMMA_URL = os.getenv("MEDGEMMA_API_URL", "").rstrip("/")
 TIMEOUT_ANALYSIS = int(os.getenv("MEDGEMMA_TIMEOUT_SEC", "120"))
 TIMEOUT_HEALTH   = 10
 MAX_RETRIES      = 2
+# How long to wait after a 429 quota error before retrying (seconds)
+QUOTA_RETRY_WAIT = 30
 
 
 # ── Prompts ────────────────────────────────────────────────────────────────
@@ -91,9 +93,10 @@ def _is_pdf(raw_bytes: bytes) -> bool:
 def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
     """
     Send an image or PDF + prompt to Gemini API. Returns structured result dict.
-    PDFs are passed as inline data (Gemini supports them natively).
+    Uses the new google-genai SDK (google.genai).
     """
-    import google.generativeai as genai
+    from google import genai as new_genai
+    from google.genai import types as genai_types
     from PIL import Image
     from io import BytesIO
 
@@ -106,86 +109,102 @@ def _analyze(image_b64: str, prompt: str, doc_type: str) -> dict:
         logger.error("Gemini API key missing in .env (tried 'gemini' and 'GEMINI_API_KEY')")
         return {"error": "gemini_api_key_missing", "source": "GEMINI_LIVE"}
 
-    genai.configure(api_key=gemini_key.strip())
+    # Model preference order: configured → 2.5-flash → 1.5-flash (fallback)
+    primary_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    model_order = [primary_model]
+    for fallback in ["gemini-2.5-flash", "gemini-1.5-flash"]:
+        if fallback not in model_order:
+            model_order.append(fallback)
 
-    model_candidates = []
-    configured_model = (os.getenv("GEMINI_MODEL") or "").strip()
-    if configured_model:
-        model_candidates.append(configured_model)
-    model_candidates.extend(["gemini-2.5-flash", "gemini-1.5-flash"])
-    seen = set()
-    model_candidates = [m for m in model_candidates if not (m in seen or seen.add(m))]
+    client = new_genai.Client(api_key=gemini_key.strip())
+    analysis_text = ""
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            logger.info(f"Gemini [{doc_type}] attempt {attempt}/{MAX_RETRIES}")
-            t0 = time.time()
+    # Pre-decode bytes once
+    raw_bytes = base64.b64decode(image_b64)
+    if _is_pdf(raw_bytes):
+        media_part = genai_types.Part.from_bytes(data=raw_bytes, mime_type="application/pdf")
+        logger.info(f"Gemini [{doc_type}]: PDF detected")
+    else:
+        image = Image.open(BytesIO(raw_bytes))
+        buf = BytesIO()
+        fmt = image.format or "PNG"
+        image.save(buf, format=fmt)
+        mime = f"image/{fmt.lower()}" if fmt.lower() in ("png","gif","webp") else "image/jpeg"
+        media_part = genai_types.Part.from_bytes(data=buf.getvalue(), mime_type=mime)
 
-            model = None
-            last_model_error = None
-            for model_name in model_candidates:
-                try:
-                    model = genai.GenerativeModel(model_name)
-                    break
-                except Exception as me:
-                    last_model_error = me
-            if model is None:
-                raise RuntimeError(f"No Gemini model available: {last_model_error}")
-
-            raw_bytes = base64.b64decode(image_b64)
-
-            # Route PDFs as inline data parts (Gemini supports PDF natively);
-            # route images through PIL as before.
-            if _is_pdf(raw_bytes):
-                logger.info(f"Gemini [{doc_type}]: detected PDF, sending as application/pdf inline part")
-                import google.generativeai.types as genai_types
-                pdf_part = {"mime_type": "application/pdf", "data": raw_bytes}
-                response = model.generate_content([pdf_part, prompt])
-            else:
-                image = Image.open(BytesIO(raw_bytes))
-                response = model.generate_content([prompt, image])
-            elapsed = time.time() - t0
-            logger.info(f"Gemini responded in {elapsed:.1f}s")
-
-            analysis_text = response.text
-            if not analysis_text:
-                return {"error": "empty_response", "source": "GEMINI_LIVE"}
-
-            # Strip markdown fences
-            text = analysis_text.strip()
-            if text.startswith("```"):
-                text = text.split("```", 2)[-1] if text.count("```") >= 2 else text
-                if text.startswith("json"):
-                    text = text[4:]
-                text = text.rstrip("`").strip()
-
+    for model_name in model_order:
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                # Try to recover a JSON object embedded in extra text.
-                m = re.search(r"\{[\s\S]*\}", text)
-                if not m:
-                    raise
-                parsed = json.loads(m.group(0))
-            parsed["_source"] = "GEMINI_LIVE"
-            parsed["_doc_type"] = doc_type
-            parsed["_elapsed_sec"] = round(elapsed, 1)
-            return parsed
+                logger.info(f"Gemini [{doc_type}] model={model_name} attempt={attempt}/{MAX_RETRIES}")
+                t0 = time.time()
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[media_part, prompt],
+                )
+                elapsed = time.time() - t0
+                logger.info(f"Gemini [{doc_type}] OK in {elapsed:.1f}s model={model_name}")
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Gemini JSON parse failed: {e} | raw: {analysis_text[:200]}")
-            return {
-                "error": "parse_failed",
-                "source": "GEMINI_LIVE",
-                "raw_response": analysis_text[:500],
-            }
-        except Exception as e:
-            logger.error(f"Gemini API failed on attempt {attempt}: {e}")
-            if attempt == MAX_RETRIES:
-                return {"error": str(e), "source": "GEMINI_LIVE"}
-            time.sleep(3)
+                analysis_text = response.text or ""
+                if not analysis_text:
+                    return {"error": "empty_response", "source": "GEMINI_LIVE"}
 
-    return {"error": "max_retries_exceeded", "source": "GEMINI_LIVE"}
+                # Strip markdown fences
+                text = analysis_text.strip()
+                if text.startswith("```"):
+                    text = text.split("```", 2)[-1] if text.count("```") >= 2 else text
+                    if text.startswith("json"):
+                        text = text[4:]
+                    text = text.rstrip("`").strip()
+
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    m = re.search(r"\{[\s\S]*\}", text)
+                    if not m:
+                        raise
+                    parsed = json.loads(m.group(0))
+                parsed["_source"] = "GEMINI_LIVE"
+                parsed["_doc_type"] = doc_type
+                parsed["_model"] = model_name
+                parsed["_elapsed_sec"] = round(elapsed, 1)
+                return parsed
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Gemini JSON parse failed: {e} | raw: {analysis_text[:200]}")
+                return {"error": "parse_failed", "source": "GEMINI_LIVE",
+                        "raw_response": analysis_text[:500]}
+
+            except Exception as e:
+                err_str = str(e)
+                is_quota = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()
+                is_not_found = "404" in err_str or "not found" in err_str.lower()
+
+                if is_not_found:
+                    # This model doesn't exist — try the next one immediately
+                    logger.warning(f"Gemini model {model_name} not found, trying next")
+                    break
+
+                if is_quota:
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"Gemini 429 quota hit on {model_name} — waiting {QUOTA_RETRY_WAIT}s before retry {attempt+1}/{MAX_RETRIES}")
+                        time.sleep(QUOTA_RETRY_WAIT)
+                    else:
+                        logger.warning(f"Gemini quota exhausted on {model_name} — trying fallback model")
+                        break  # try next model
+                else:
+                    logger.error(f"Gemini API error on {model_name} attempt {attempt}: {e}")
+                    if attempt == MAX_RETRIES:
+                        break  # try next model
+                    time.sleep(5)
+
+    # All models exhausted — return a graceful no-evidence result so adjudication
+    # can still proceed without crashing, and the decision notes the parse failure.
+    logger.error(f"Gemini [{doc_type}]: all models failed — returning quota_exhausted stub")
+    return {
+        "error": "quota_exhausted",
+        "source": "GEMINI_LIVE",
+        "note": "Gemini API quota exceeded. Evidence could not be parsed. Adjudication will proceed without document evidence.",
+    }
 
 
 # ── Public API ──────────────────────────────────────────────────────────────

@@ -818,10 +818,10 @@ async def debug_env(user: dict = Depends(get_current_user)):
     # Live-test Gemini
     if gemini_key:
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=gemini_key.strip())
-            gmodel = genai.GenerativeModel(os.getenv("GEMINI_MODEL") or "gemini-1.5-flash")
-            gresp = gmodel.generate_content("Reply with exactly: CLAIMIQ_OK")
+            from google import genai as _genai
+            _gclient = _genai.Client(api_key=gemini_key.strip())
+            _gmodel = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+            gresp = _gclient.models.generate_content(model=_gmodel, contents="Reply with exactly: CLAIMIQ_OK")
             result["gemini_live_test"] = f"PASS — model replied: {(gresp.text or '').strip()[:60]}"
         except Exception as e:
             result["gemini_live_test"] = f"FAIL — {str(e)[:300]}"

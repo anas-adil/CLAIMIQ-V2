@@ -14,6 +14,7 @@ aiofiles>=24.1.0
 # External multimodal inference/API
 requests>=2.32.0
 pillow>=10.0.0
+google-genai>=1.0.0
 
 # PDF EOB generation
 reportlab>=4.2.0

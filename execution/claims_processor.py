@@ -116,10 +116,15 @@ def process_claim(claim_id: int = None, raw_text: str = None) -> dict:
             if evidence_b64:
                 try:
                     initial_data = json.loads(evidence_b64) if isinstance(evidence_b64, str) else evidence_b64
+                    quota_hit = False
                     if "_evidence_base64" in initial_data and initial_data["_evidence_base64"]:
                         parsed = evidence_parser.parse_evidence(initial_data["_evidence_base64"])
                         parsed_evidence_list.append(parsed)
-                    if "_invoice_base64" in initial_data and initial_data["_invoice_base64"]:
+                        # If quota exhausted, skip second document to save rate-limit budget
+                        if parsed.get("source") == "PARSE_FAILED" and "quota" in str(parsed.get("parsed_evidence", {}).get("error", "")).lower():
+                            quota_hit = True
+                            logger.warning(f"[{claim_id}] Gemini quota hit on evidence — skipping invoice parse")
+                    if not quota_hit and "_invoice_base64" in initial_data and initial_data["_invoice_base64"]:
                         parsed = evidence_parser.parse_evidence(initial_data["_invoice_base64"])
                         parsed_evidence_list.append(parsed)
                         

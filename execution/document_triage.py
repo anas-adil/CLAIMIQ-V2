@@ -87,8 +87,11 @@ def classify_document(image_b64: str) -> dict:
     """
     result = medgemma_client.classify_document(image_b64)
     if "error" in result:
-        logger.warning(f"Classification failed, defaulting to UNKNOWN: {result['error']}")
-        return {"doc_type": "UNKNOWN", "confidence": 0.0, "reasoning": result["error"]}
+        err = result["error"]
+        logger.warning(f"Classification failed, defaulting to UNKNOWN: {err}")
+        # Propagate quota signal so callers can surface it cleanly
+        return {"doc_type": "UNKNOWN", "confidence": 0.0, "reasoning": err,
+                "quota_exhausted": "quota" in str(err).lower() or "quota_exhausted" in str(err)}
         
     doc_type = result.get("doc_type", "UNKNOWN").upper()
     if doc_type not in ["XRAY", "LAB_REPORT", "INVOICE"]:
